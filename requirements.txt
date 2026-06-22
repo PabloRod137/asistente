@@ -1,0 +1,14 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+requests==2.31.0
+google-genai>=0.1.1
+python-dotenv==1.0.1
+pydantic==2.6.1
+APScheduler==3.10.4
+fpdf2==2.7.8
+openpyxl==3.1.2
+O365==2.0.35
+google-api-python-client==2.118.0
+google-auth==2.27.0
+pymsteams==0.2.2
+pdfplumber==0.11.0
