@@ -1,0 +1,45 @@
+# === ARCHIVOS CONFIDENCIALES Y CREDENCIALES ===
+.env
+.env.local
+.env.*
+*.pem
+*.key
+
+# === BASES DE DATOS LOCALES ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === CACHÉ DE PYTHON Y DEPENDENCIAS ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# === VOLÚMENES Y DATOS DE CONTENEDORES ===
+.docker-data/
+mysql_data/
+
+# === ARCHIVOS DEL SISTEMA OPERATIVO ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === CONFIGURACIONES DE EDITORES (IDE) ===
+.vscode/
+.idea/
+
+# === DATOS DE NAVEGADORES (SELENIUM / PLAYWRIGHT) ===
+chrome_user_data/
+chrome_amigo_data/
+
+# === REGISTROS Y LOGS ===
+*.log
+*_log.txt
+*log.txt
+log/
+logs/
