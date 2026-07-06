@@ -1,6 +1,6 @@
 import os
-import sqlite3
 import logging
+import database
 import requests
 import json
 from datetime import datetime, timedelta
@@ -14,8 +14,7 @@ def get_cliente(phone_number: str) -> dict | None:
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() == "false":
         return None
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -47,8 +46,7 @@ def registrar_visita(phone_number: str):
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() == "false":
         return
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     cursor.execute("SELECT ultima_visita, total_conversaciones FROM clientes WHERE phone_number = ?", (phone_number,))
@@ -94,8 +92,7 @@ def upsert_cliente(phone_number: str, datos: dict):
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() == "false":
         return
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     cursor.execute("SELECT nombre, empresa, email, total_conversaciones FROM clientes WHERE phone_number = ?", (phone_number,))

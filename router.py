@@ -9,6 +9,14 @@ def detectar_intencion(message: str) -> str:
     Clasifica el mensaje entrante del usuario en una de las intenciones soportadas:
     AGENDA, TICKET, FACTURA, TRIAJE, COBRADOR, CHAT.
     """
+    # Reglas duras (heurísticas rápidas) para optimización y robustez ante fallos de la API
+    if message:
+        msg_lower = message.lower().strip()
+        if "factura" in msg_lower:
+            if os.getenv("MODULO_FACTURAS", "true").strip().lower() != "false":
+                logger.info("Heurística de intención detectada: FACTURA")
+                return "FACTURA"
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         logger.warning("Falta GEMINI_API_KEY. Router devuelve CHAT por defecto.")

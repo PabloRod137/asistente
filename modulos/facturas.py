@@ -24,7 +24,7 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     
     # Título y número de factura
     pdf.set_font("Helvetica", style="B", size=16)
-    pdf.cell(200, 10, txt=f"FACTURA Nº {num_factura:05d}", ln=True, align="R")
+    pdf.cell(200, 10, txt=f"FACTURA Num. {num_factura:05d}", ln=True, align="R")
     pdf.ln(10)
     
     # Datos Emisor
@@ -58,28 +58,28 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     
     pdf.set_font("Helvetica", size=10)
     pdf.cell(100, 8, txt=concepto, border=1)
-    pdf.cell(30, 8, txt=f"{base:.2f} €", border=1, align="R")
+    pdf.cell(30, 8, txt=f"{base:.2f} EUR", border=1, align="R")
     pdf.cell(20, 8, txt=f"{iva_pct}%", border=1, align="C")
-    pdf.cell(40, 8, txt=f"{total:.2f} €", border=1, align="R")
+    pdf.cell(40, 8, txt=f"{total:.2f} EUR", border=1, align="R")
     pdf.ln(15)
     
     # Resumen totalizadores
     pdf.set_font("Helvetica", style="B", size=10)
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt="Total Base:", align="R")
-    pdf.cell(30, 8, txt=f"{base:.2f} €", align="R")
+    pdf.cell(30, 8, txt=f"{base:.2f} EUR", align="R")
     pdf.ln(6)
     
     iva_cuota = total - base
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt=f"IVA ({iva_pct}%):", align="R")
-    pdf.cell(30, 8, txt=f"{iva_cuota:.2f} €", align="R")
+    pdf.cell(30, 8, txt=f"{iva_cuota:.2f} EUR", align="R")
     pdf.ln(6)
     
     pdf.set_font("Helvetica", style="B", size=12)
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt="TOTAL:", align="R")
-    pdf.cell(30, 8, txt=f"{total:.2f} €", align="R")
+    pdf.cell(30, 8, txt=f"{total:.2f} EUR", align="R")
     
     # Guardar PDF
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -171,7 +171,29 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
     except Exception as e:
         logger.error(f"Error parseando datos de factura con Gemini: {e}")
-        return "No he podido interpretar correctamente los datos para la factura. Por favor, asegúrate de indicar el destinatario, CIF, concepto e importe."
+        # Intentar extracción fallback con regex en caso de fallo de API para robustez
+        try:
+            destinatario_match = re.search(r"a nombre de\s+(.+?)(?:,|\s+con\s+cif|\s+cif)", message, re.IGNORECASE)
+            cif_match = re.search(r"cif\s+([A-Z0-9]+)", message, re.IGNORECASE)
+            concepto_match = re.search(r"concepto de\s+(.+?)(?:,|\s+por\s+importe|\s+importe)", message, re.IGNORECASE)
+            importe_match = re.search(r"importe de\s+(\d+)", message, re.IGNORECASE)
+            email_match = re.search(r"correo\s+(?:es\s+)?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)", message, re.IGNORECASE)
+            
+            if destinatario_match and cif_match and concepto_match and importe_match:
+                datos = {
+                    "destinatario": destinatario_match.group(1).strip(),
+                    "cif": cif_match.group(1).strip().upper(),
+                    "concepto": concepto_match.group(1).strip(),
+                    "base_imponible": float(importe_match.group(1).strip()),
+                    "porcentaje_iva": 21,
+                    "email": email_match.group(1).strip() if email_match else None
+                }
+                logger.info(f"Fallback Regex exitoso al extraer datos de factura: {datos}")
+            else:
+                return "No he podido interpretar correctamente los datos para la factura. Por favor, asegúrate de indicar el destinatario, CIF, concepto e importe."
+        except Exception as fe:
+            logger.error(f"Error en el fallback de regex para factura: {fe}")
+            return "No he podido interpretar correctamente los datos para la factura. Por favor, asegúrate de indicar el destinatario, CIF, concepto e importe."
 
     destinatario = datos.get("destinatario")
     cif = datos.get("cif")
@@ -194,9 +216,8 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     # Calcular total e IVA
     total = base * (1 + (iva_pct / 100))
 
-    # Obtener número de factura correlativo y guardar en SQLite
-    num_factura = get_next_factura_numero()
-    save_factura(destinatario, cif, concepto, total)
+    # Guardar en SQLite de forma atómica y obtener el ID incremental asignado
+    num_factura = save_factura(destinatario, cif, concepto, total)
 
     # Ruta temporal para guardar PDF
     storage_ruta = os.getenv("STORAGE_RUTA", "./storage")

@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import database
 import logging
 import requests
 import json
@@ -78,8 +78,7 @@ def ejecutar_accion_interno(datos: dict) -> str:
     """
     Ejecuta en SQLite la acción de agenda/tarea extraída y devuelve una confirmación legible.
     """
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     accion = datos.get("accion")
@@ -175,8 +174,7 @@ def generar_briefing_diario():
     if os.getenv("MODULO_SECRETARIA", "true").strip().lower() == "false":
         return
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     hoy = datetime.now().strftime("%Y-%m-%d")
@@ -365,8 +363,7 @@ TEXTO:
         res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         plazos = json.loads(res_text)
         
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         for p in plazos:

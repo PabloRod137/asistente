@@ -74,8 +74,7 @@ def procesar_comando(phone_number: str, message: str) -> str:
         
     # --- COMANDO: /clientes_hoy ---
     elif cmd == "/clientes_hoy":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         # Obtener conversaciones iniciadas hoy
@@ -109,8 +108,7 @@ def procesar_comando(phone_number: str, message: str) -> str:
         
     # --- COMANDO: /resumen_semana ---
     elif cmd == "/resumen_semana":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         # Obtener resúmenes de conversaciones de los últimos 7 días
@@ -166,8 +164,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             
     # --- COMANDO: /pendientes ---
     elif cmd == "/pendientes":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         # Buscar resúmenes que puedan contener pendientes
@@ -198,8 +195,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         
     # --- COMANDO: /stats ---
     elif cmd == "/stats":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         # Citas agendadas
@@ -230,8 +226,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
 
     # --- COMANDO: /agenda ---
     elif cmd == "/agenda":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         hoy = datetime.now().strftime("%Y-%m-%d")
@@ -259,8 +254,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         
     # --- COMANDO: /agenda_semana ---
     elif cmd == "/agenda_semana":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         hoy = datetime.now().strftime("%Y-%m-%d")
@@ -292,8 +286,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         
     # --- COMANDO: /plazos ---
     elif cmd == "/plazos":
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         hoy = datetime.now().strftime("%Y-%m-%d")
@@ -327,8 +320,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         except ValueError:
             return "ID inválido. Escribe un número."
             
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT titulo, tipo FROM agenda_interna WHERE id = ?", (item_id,))
@@ -362,8 +354,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         except Exception as err:
             return f"Error en los parámetros: {err}. Asegúrate de usar comillas si contienen espacios y la fecha en formato YYYY-MM-DD."
             
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -387,8 +378,7 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         if not args:
             return "Por favor, escribe un mensaje para enviarle al cliente."
             
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         
         # Obtener el teléfono del cliente del ticket

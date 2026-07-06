@@ -63,6 +63,21 @@ def on_startup():
         except Exception as e:
             logger.error(f"Error programando briefing diario: {e}")
 
+    # Programar limpieza periódica de archivos temporales de triaje (cada 12 horas)
+    try:
+        scheduler.add_job(
+            triaje.limpiar_archivos_temporales_antiguos,
+            trigger="interval",
+            hours=12,
+            id="limpieza_temporales_triaje",
+            replace_existing=True
+        )
+        logger.info("Programada limpieza periódica de archivos temporales de triaje (cada 12 horas).")
+        # Ejecutar una primera limpieza al arrancar para liberar espacio
+        triaje.limpiar_archivos_temporales_antiguos()
+    except Exception as e:
+        logger.error(f"Error programando limpieza periódica de temporales: {e}")
+
 @app.get("/")
 def read_root():
     return {"status": "online", "message": f"{APP_NAME} en marcha y operativo."}

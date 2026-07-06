@@ -78,7 +78,7 @@ Genera facturas oficiales en PDF para clientes del negocio.
 
 ### 4. Triaje de Presupuestos (`modulos/triaje.py`)
 Interactúa de manera guiada con el cliente para presupuestar averías.
-- **Flujo**: Pregunta nombre, teléfono, descripción del problema, código postal, urgencia y solicita una foto. Un prompt multimodal con Gemini determina la categoría del oficio (fontanería, electricidad, etc.), evalúa la complejidad técnica de la avería (baja, media, alta) y redacta un resumen ejecutivo enviado de inmediato al profesional responsable por Telegram y Email.
+- **Flujo**: Pregunta nombre, teléfono, descripción del problema, código postal, urgencia y solicita una foto. Un prompt multimodal con Gemini determina la categoría del oficio (fontanería, electricidad, etc.), evalúa la complejidad técnica de la avería (baja, media, alta) y redacta un resumen ejecutivo enviado de inmediato al profesional responsable por Teams, WhatsApp y Email.
 
 ### 5. Gestión de Cobros (`modulos/cobrador.py`)
 Permite lanzar avisos masivos de deudas pendientes.
@@ -138,12 +138,11 @@ Crea el archivo `.env` renombrando el archivo `.env.example` y configurando las 
 |---|---|---|---|
 | `APP_NAME` | Config | Nombre descriptivo del bot. | `Pimia Asistente` |
 | `GEMINI_API_KEY` | API | Clave de acceso a Google Gemini. | `AIzaSy...` |
-| `TELEGRAM_TOKEN` | API | Token del bot de Telegram (alerta de profesionales). | `12345:AA...` |
 | `WHATSAPP_TOKEN` | API | Token de acceso de Meta Developers. | `EAAG...` |
 | `WHATSAPP_PHONE_ID` | API | ID de teléfono emisor en la API de Meta. | `123456789...` |
 | `VERIFY_TOKEN` | Config | Token de verificación para configurar el webhook. | `pimia_secret_2026` |
 | `GESTOR_WHATSAPP` | Admin | Teléfono de WhatsApp del administrador (recibe resúmenes). | `34600112233` |
-| `GESTOR_CHAT_ID` | Admin | ID del chat de Telegram del gestor. | `987654321` |
+| `TEAMS_WEBHOOK_URL` | API | URL del Incoming Webhook para canal de Teams. | `https://outlook.office.com/webhook/...` |
 | `EMAIL_GESTOR` | Admin | Email del administrador del bot. | `admin@negocio.com` |
 | `EMAIL_EMISOR` | SMTP | Email para enviar notificaciones de triaje y facturas. | `sistema@gmail.com` |
 | `SMTP_PASSWORD` | SMTP | Contraseña de aplicación del email emisor. | `abcd efgh ijkl` |

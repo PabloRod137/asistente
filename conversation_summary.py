@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import database
 import requests
 import logging
 import smtplib
@@ -46,8 +46,7 @@ def registrar_actividad(phone_number: str):
     if os.getenv("MODULO_RESUMEN", "true").strip().lower() == "false":
         return
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     # Comprobar si hay una conversación activa
@@ -106,8 +105,7 @@ def generar_resumen(phone_number: str) -> str:
     if not api_key:
         return "No API key configured for Gemini."
         
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     # Obtener el inicio de la conversación activa
@@ -262,8 +260,7 @@ def generar_y_enviar_resumen(phone_number: str):
     if os.getenv("MODULO_RESUMEN", "true").strip().lower() == "false":
         return
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -307,7 +304,7 @@ def generar_y_enviar_resumen(phone_number: str):
     
     # Guardar el resumen generado en la columna resumen_texto de conversaciones
     try:
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE conversaciones SET resumen_texto = ? WHERE phone_number = ?

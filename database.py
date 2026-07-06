@@ -1,11 +1,57 @@
 import sqlite3
 import os
+import logging
+
+logger = logging.getLogger("asistente.database")
 
 DB_PATH = os.getenv("DB_PATH", "chatbot.db")
 
-def init_db():
+def get_connection():
+    """
+    Retorna una nueva conexión SQLite3 configurada con modo WAL y busy_timeout.
+    Se utiliza una conexión nueva por llamada/hilo para evitar condiciones de carrera.
+    """
     db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
     conn = sqlite3.connect(db_path_dynamic)
+    # Habilitar Write-Ahead Logging (WAL) para permitir lecturas concurrentes sin bloquear escrituras
+    conn.execute("PRAGMA journal_mode=WAL;")
+    # Esperar hasta 5000 ms en caso de bloqueo antes de lanzar excepción
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
+
+def migrar_facturas_autoincrement(conn):
+    """
+    Comprueba si la tabla 'facturas' existe y si su id tiene AUTOINCREMENT.
+    Si no lo tiene, migra la tabla de forma segura e idempotente.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='facturas'")
+    row = cursor.fetchone()
+    if row:
+        sql_schema = row[0]
+        if "autoincrement" not in sql_schema.lower():
+            logger.info("Migrando la tabla 'facturas' para habilitar AUTOINCREMENT...")
+            cursor.execute("ALTER TABLE facturas RENAME TO facturas_old;")
+            cursor.execute('''
+                CREATE TABLE facturas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    destinatario TEXT NOT NULL,
+                    cif TEXT NOT NULL,
+                    concepto TEXT NOT NULL,
+                    importe REAL NOT NULL,
+                    fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+            cursor.execute('''
+                INSERT INTO facturas (id, destinatario, cif, concepto, importe, fecha)
+                SELECT id, destinatario, cif, concepto, importe, fecha FROM facturas_old;
+            ''')
+            cursor.execute("DROP TABLE facturas_old;")
+            conn.commit()
+            logger.info("Migración de 'facturas' completada con éxito.")
+
+def init_db():
+    conn = get_connection()
     cursor = conn.cursor()
     
     # Tabla de mensajes
@@ -114,11 +160,14 @@ def init_db():
     ''')
     
     conn.commit()
+    
+    # Ejecutar la migración de autoincrement sobre la tabla facturas si fuese necesario
+    migrar_facturas_autoincrement(conn)
+    
     conn.close()
 
 def save_message(phone_number: str, role: str, content: str):
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO messages (phone_number, role, content)
@@ -129,8 +178,7 @@ def save_message(phone_number: str, role: str, content: str):
 
 def get_history(phone_number: str, limit: int = 10) -> list:
     max_limit = min(limit, 10)
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -147,8 +195,7 @@ def get_history(phone_number: str, limit: int = 10) -> list:
 
 # Funciones de utilidad para citas (Agenda)
 def save_cita(phone_number: str, event_id: str, fecha: str, servicio: str, estado: str):
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO citas (phone_number, event_id, fecha, servicio, estado)
@@ -158,8 +205,7 @@ def save_cita(phone_number: str, event_id: str, fecha: str, servicio: str, estad
     conn.close()
 
 def get_active_cita(phone_number: str):
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT event_id, fecha, servicio, estado FROM citas
@@ -173,8 +219,7 @@ def get_active_cita(phone_number: str):
     return None
 
 def update_cita_estado(event_id: str, estado: str):
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         UPDATE citas SET estado = ? WHERE event_id = ?
@@ -184,8 +229,7 @@ def update_cita_estado(event_id: str, estado: str):
 
 # Funciones de utilidad para facturas
 def get_next_factura_numero() -> int:
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM facturas')
     count = cursor.fetchone()[0]
@@ -193,8 +237,7 @@ def get_next_factura_numero() -> int:
     return count + 1
 
 def save_factura(destinatario: str, cif: str, concepto: str, importe: float) -> int:
-    db_path_dynamic = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path_dynamic)
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO facturas (destinatario, cif, concepto, importe)
