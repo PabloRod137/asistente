@@ -45,6 +45,28 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
+    # Comprobación de seguridad para MODO_TEST y entorno de producción
+    modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
+    entorno = os.getenv("ENTORNO", os.getenv("ENV", "desarrollo")).strip().lower()
+    
+    if modo_test:
+        if entorno in ["produccion", "production"]:
+            critical_msg = (
+                "FATAL: El servidor no puede arrancar porque MODO_TEST=true "
+                "está activado en un entorno de PRODUCCIÓN. Abortando inicio por seguridad fiscal."
+            )
+            logger.critical(critical_msg)
+            raise RuntimeError(critical_msg)
+        else:
+            logger.warning(
+                "\n"
+                "========================================================================\n"
+                "⚠️  ATENCIÓN: MODO_TEST está ACTIVADO.\n"
+                "Las facturas se generarán con datos simulados, NO con extracción real de Gemini.\n"
+                "Esto NUNCA debe estar activo en producción.\n"
+                "========================================================================"
+            )
+
     logger.info("Iniciando la base de datos de Asistente...")
     database.init_db()
     

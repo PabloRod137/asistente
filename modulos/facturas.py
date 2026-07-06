@@ -20,17 +20,39 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     """
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Helvetica", size=12)
     
+    # Cargar fuente DejaVuSans de forma defensiva con fallback controlado a Helvetica
+    usa_dejavu = False
+    try:
+        pdf.add_font('DejaVu', '', 'assets/fonts/DejaVuSans.ttf')
+        pdf.set_font('DejaVu', size=10)
+        simbolo_euro, simbolo_num = '€', 'Nº'
+        usa_dejavu = True
+    except Exception as e:
+        logger.warning(f"No se pudo cargar la fuente DejaVu, usando Helvetica como fallback: {e}")
+        pdf.set_font('Helvetica', size=10)
+        simbolo_euro, simbolo_num = 'EUR', 'Num.'
+        
     # Título y número de factura
-    pdf.set_font("Helvetica", style="B", size=16)
-    pdf.cell(200, 10, txt=f"FACTURA Num. {num_factura:05d}", ln=True, align="R")
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=16)
+    else:
+        pdf.set_font('Helvetica', style="B", size=16)
+        
+    pdf.cell(200, 10, txt=f"FACTURA {simbolo_num} {num_factura:05d}", ln=True, align="R")
     pdf.ln(10)
     
     # Datos Emisor
-    pdf.set_font("Helvetica", style="B", size=12)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=12)
+    else:
+        pdf.set_font('Helvetica', style="B", size=12)
     pdf.cell(100, 7, txt="EMISOR", ln=True)
-    pdf.set_font("Helvetica", size=10)
+    
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=10)
+    else:
+        pdf.set_font('Helvetica', size=10)
     pdf.cell(100, 5, txt=f"Nombre: {emisor.get('nombre', '')}", ln=True)
     pdf.cell(100, 5, txt=f"CIF: {emisor.get('cif', '')}", ln=True)
     pdf.cell(100, 5, txt=f"Dirección: {emisor.get('direccion', '')}", ln=True)
@@ -39,9 +61,16 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf.ln(10)
     
     # Datos Receptor
-    pdf.set_font("Helvetica", style="B", size=12)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=12)
+    else:
+        pdf.set_font('Helvetica', style="B", size=12)
     pdf.cell(100, 7, txt="RECEPTOR", ln=True)
-    pdf.set_font("Helvetica", size=10)
+    
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=10)
+    else:
+        pdf.set_font('Helvetica', size=10)
     pdf.cell(100, 5, txt=f"Nombre/Razón Social: {receptor.get('nombre', '')}", ln=True)
     pdf.cell(100, 5, txt=f"CIF/NIF: {receptor.get('cif', '')}", ln=True)
     if receptor.get("email"):
@@ -49,37 +78,49 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf.ln(15)
     
     # Línea de Concepto y Precios (Tabla simple)
-    pdf.set_font("Helvetica", style="B", size=10)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=10)
+    else:
+        pdf.set_font('Helvetica', style="B", size=10)
     pdf.cell(100, 8, txt="Concepto", border=1)
     pdf.cell(30, 8, txt="Base Imponible", border=1, align="R")
     pdf.cell(20, 8, txt="IVA", border=1, align="C")
     pdf.cell(40, 8, txt="Total", border=1, align="R")
     pdf.ln(8)
     
-    pdf.set_font("Helvetica", size=10)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=10)
+    else:
+        pdf.set_font('Helvetica', size=10)
     pdf.cell(100, 8, txt=concepto, border=1)
-    pdf.cell(30, 8, txt=f"{base:.2f} EUR", border=1, align="R")
+    pdf.cell(30, 8, txt=f"{base:.2f} {simbolo_euro}", border=1, align="R")
     pdf.cell(20, 8, txt=f"{iva_pct}%", border=1, align="C")
-    pdf.cell(40, 8, txt=f"{total:.2f} EUR", border=1, align="R")
+    pdf.cell(40, 8, txt=f"{total:.2f} {simbolo_euro}", border=1, align="R")
     pdf.ln(15)
     
     # Resumen totalizadores
-    pdf.set_font("Helvetica", style="B", size=10)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=10)
+    else:
+        pdf.set_font('Helvetica', style="B", size=10)
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt="Total Base:", align="R")
-    pdf.cell(30, 8, txt=f"{base:.2f} EUR", align="R")
+    pdf.cell(30, 8, txt=f"{base:.2f} {simbolo_euro}", align="R")
     pdf.ln(6)
     
     iva_cuota = total - base
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt=f"IVA ({iva_pct}%):", align="R")
-    pdf.cell(30, 8, txt=f"{iva_cuota:.2f} EUR", align="R")
+    pdf.cell(30, 8, txt=f"{iva_cuota:.2f} {simbolo_euro}", align="R")
     pdf.ln(6)
     
-    pdf.set_font("Helvetica", style="B", size=12)
+    if usa_dejavu:
+        pdf.set_font('DejaVu', size=12)
+    else:
+        pdf.set_font('Helvetica', style="B", size=12)
     pdf.cell(130, 8, txt="")
     pdf.cell(30, 8, txt="TOTAL:", align="R")
-    pdf.cell(30, 8, txt=f"{total:.2f} EUR", align="R")
+    pdf.cell(30, 8, txt=f"{total:.2f} {simbolo_euro}", align="R")
     
     # Guardar PDF
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -131,47 +172,11 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     """
     Parsea la petición del usuario, genera la factura y la envía.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return "Servicio de facturación no disponible temporalmente (Falta API Key)."
-        
-    # Usar Gemini para extraer los datos de la factura del texto libre
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    datos = None
+    es_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
     
-    prompt = f"""
-    Analiza la siguiente petición para generar una factura y extrae los datos fiscales:
-    Petición: "{message}"
-
-    Debes extraer:
-    1. destinatario: Nombre o razón social del cliente receptor (string).
-    2. cif: CIF o NIF del receptor (string).
-    3. concepto: El trabajo o servicio prestado (string).
-    4. base_imponible: Importe base en euros. Si no se especifica explícitamente y solo hay un total, calcula la base sabiendo que el IVA por defecto es 21%. (float).
-    5. porcentaje_iva: Porcentaje de IVA a aplicar. Por defecto 21 si no se menciona otro (integer).
-    6. email: Dirección de correo electrónico del destinatario si se menciona en el mensaje, o null.
-
-    Devuelve ÚNICAMENTE un JSON válido con esta estructura:
-    {{
-        "destinatario": "string",
-        "cif": "string",
-        "concepto": "string",
-        "base_imponible": float,
-        "porcentaje_iva": int,
-        "email": "string o null"
-    }}
-    """
-    
-    try:
-        response = requests.post(url, json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
-        }, headers={'Content-Type': 'application/json'}, timeout=10)
-        response.raise_for_status()
-        
-        datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
-    except Exception as e:
-        logger.error(f"Error parseando datos de factura con Gemini: {e}")
-        # Intentar extracción fallback con regex en caso de fallo de API para robustez
+    if es_test:
+        logger.info("MODO_TEST activado. Emulando extracción de Gemini mediante regex.")
         try:
             destinatario_match = re.search(r"a nombre de\s+(.+?)(?:,|\s+con\s+cif|\s+cif)", message, re.IGNORECASE)
             cif_match = re.search(r"cif\s+([A-Z0-9]+)", message, re.IGNORECASE)
@@ -188,12 +193,59 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
                     "porcentaje_iva": 21,
                     "email": email_match.group(1).strip() if email_match else None
                 }
-                logger.info(f"Fallback Regex exitoso al extraer datos de factura: {datos}")
-            else:
-                return "No he podido interpretar correctamente los datos para la factura. Por favor, asegúrate de indicar el destinatario, CIF, concepto e importe."
-        except Exception as fe:
-            logger.error(f"Error en el fallback de regex para factura: {fe}")
-            return "No he podido interpretar correctamente los datos para la factura. Por favor, asegúrate de indicar el destinatario, CIF, concepto e importe."
+                logger.info(f"MODO_TEST: Extracción simulada exitosa: {datos}")
+        except Exception as te:
+            logger.error(f"Error en la extracción mock de MODO_TEST: {te}")
+            
+    if not datos:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "Servicio de facturación no disponible temporalmente (Falta API Key)."
+            
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        
+        prompt = f"""
+        Analiza la siguiente petición para generar una factura y extrae los datos fiscales:
+        Petición: "{message}"
+
+        Debes extraer:
+        1. destinatario: Nombre o razón social del cliente receptor (string).
+        2. cif: CIF o NIF del receptor (string).
+        3. concepto: El trabajo o servicio prestado (string).
+        4. base_imponible: Importe base en euros. Si no se especifica explícitamente y solo hay un total, calcula la base sabiendo que el IVA por defecto es 21%. (float).
+        5. porcentaje_iva: Porcentaje de IVA a aplicar. Por defecto 21 si no se menciona otro (integer).
+        6. email: Dirección de correo electrónico del destinatario si se menciona en el mensaje, o null.
+
+        Devuelve ÚNICAMENTE un JSON válido con esta estructura:
+        {{
+            "destinatario": "string",
+            "cif": "string",
+            "concepto": "string",
+            "base_imponible": float,
+            "porcentaje_iva": int,
+            "email": "string o null"
+        }}
+        """
+        
+        try:
+            response = requests.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
+            }, headers={'Content-Type': 'application/json'}, timeout=10)
+            response.raise_for_status()
+            
+            datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
+        except Exception as e:
+            logger.error(f"Error extrayendo datos de factura con Gemini: {e}")
+            # ESCALADO A HUMANO SEGURO
+            import escalado_humano
+            ticket_id = escalado_humano.crear_ticket_escalado(
+                phone_number=phone_number,
+                mensaje_cliente=message,
+                respuesta_maira="[Facturación]: Fallo al extraer datos fiscales con Gemini."
+            )
+            ticket_info = f" (Ticket #{ticket_id})" if ticket_id else ""
+            return f"Disculpa, nuestro sistema de facturación automático tiene un problema temporal. He pasado tu solicitud a un gestor humano{ticket_info} que te enviará la factura a la mayor brevedad posible. ¡Gracias! 👍"
 
     destinatario = datos.get("destinatario")
     cif = datos.get("cif")
@@ -202,8 +254,31 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     iva_pct = datos.get("porcentaje_iva", 21)
     email_dest = datos.get("email")
 
-    if not destinatario or not cif or not concepto or base <= 0:
-        return "Por favor, especifica claramente: destinatario, CIF/NIF, concepto e importe para generar la factura."
+    # Validaciones defensivas de CIF/NIF e importe
+    cif_valido = False
+    if cif:
+        cif = cif.strip().upper()
+        # Patrón básico alfanumérico español de 9 caracteres
+        if re.match(r"^[A-Z0-9]{9}$", cif):
+            cif_valido = True
+            
+    limite_maximo_str = os.getenv("FACTURA_LIMITE_MAXIMO", "50000.0")
+    try:
+        limite_maximo = float(limite_maximo_str)
+    except ValueError:
+        limite_maximo = 50000.0
+
+    if not destinatario or not cif_valido or not concepto or base <= 0.0 or base > limite_maximo:
+        logger.warning(f"Validación defensiva fallida. Datos interpretados: {datos}")
+        # ESCALADO A HUMANO SEGURO
+        import escalado_humano
+        ticket_id = escalado_humano.crear_ticket_escalado(
+            phone_number=phone_number,
+            mensaje_cliente=message,
+            respuesta_maira=f"[Facturación]: Datos inválidos detectados (CIF válido: {cif_valido}, Importe: {base} EUR)."
+        )
+        ticket_info = f" (Ticket #{ticket_id})" if ticket_id else ""
+        return f"Disculpa, los datos interpretados para la factura no cumplen con las validaciones de seguridad de nuestro sistema. He pasado tu solicitud a un gestor humano{ticket_info} para su revisión y emisión manual. ¡Gracias! 👍"
 
     # Datos Emisor desde .env
     emisor = {
