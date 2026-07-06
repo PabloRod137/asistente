@@ -9,6 +9,9 @@
 *.db
 *.sqlite
 *.sqlite3
+chatbot.db.bak
+chatbot.db-wal
+chatbot.db-shm
 
 # === CACHÉ DE PYTHON Y DEPENDENCIAS ===
 __pycache__/
