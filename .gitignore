@@ -26,6 +26,7 @@ env/
 # === VOLÚMENES Y DATOS DE CONTENEDORES ===
 .docker-data/
 mysql_data/
+storage/
 
 # === ARCHIVOS DEL SISTEMA OPERATIVO ===
 .DS_Store

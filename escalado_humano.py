@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import database
 import logging
 from datetime import datetime
 import pymsteams
@@ -37,8 +37,7 @@ def crear_ticket_escalado(phone_number: str, mensaje_cliente: str, respuesta_mai
     if os.getenv("MODULO_ESCALADO", "true").strip().lower() == "false":
         return None
 
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -86,8 +85,7 @@ def actualizar_estado_ticket(ticket_id: int, nuevo_estado: str):
     """
     Actualiza el estado de un ticket y registra la fecha de resolución si se marca como resuelto.
     """
-    db_path = os.getenv("DB_PATH", "chatbot.db")
-    conn = sqlite3.connect(db_path)
+    conn = database.get_connection()
     cursor = conn.cursor()
     
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -115,8 +113,7 @@ def resolver_ticket_si_despedida(phone_number: str, message: str):
     """
     import conversation_summary
     if conversation_summary.detectar_despedida(message):
-        db_path = os.getenv("DB_PATH", "chatbot.db")
-        conn = sqlite3.connect(db_path)
+        conn = database.get_connection()
         cursor = conn.cursor()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         

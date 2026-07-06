@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+from datetime import datetime, timedelta
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -279,9 +280,44 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
             
         # Limpiar sesión y archivos temporales
         foto_path = session.get("foto_path")
-        # Nota: no borramos la foto si queremos que permanezca registrada en storage, pero en este caso,
-        # como la enviamos por email, podemos eliminarla del temporal si lo deseamos, o mantenerla.
-        # Por ahora limpiamos la sesión de memoria.
+        if foto_path and os.getenv("MODULO_ESCALADO", "true").strip().lower() != "false": # Borrar en caso de que este disponible
+            pass
+        if foto_path and os.path.exists(foto_path):
+            try:
+                os.remove(foto_path)
+                logger.info(f"Foto temporal de triaje eliminada tras procesar: {foto_path}")
+            except Exception as fe:
+                logger.error(f"Error al eliminar foto temporal de triaje finalizado: {fe}")
         del _triaje_sesiones[phone_number]
         
         return "¡Perfecto! Tu solicitud ha sido registrada y enviada al profesional correspondiente. Se pondrán en contacto contigo lo antes posible. ¡Gracias! 👍"
+
+def limpiar_archivos_temporales_antiguos():
+    """
+    Escanea la carpeta de temporales 'storage/temp/' y borra archivos con más de 2 horas de antigüedad.
+    """
+    storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
+    temp_dir = os.path.join(storage_ruta, "temp")
+    if not os.path.exists(temp_dir):
+        return
+        
+    ahora = datetime.now()
+    limite = ahora - timedelta(hours=2)
+    
+    logger.info("Iniciando escaneo y limpieza de archivos temporales antiguos en storage/temp...")
+    try:
+        count = 0
+        for filename in os.listdir(temp_dir):
+            filepath = os.path.join(temp_dir, filename)
+            if os.path.isfile(filepath):
+                if filename.startswith('.'):
+                    continue
+                mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+                if mtime < limite:
+                    os.remove(filepath)
+                    logger.info(f"Archivo temporal antiguo eliminado: {filepath}")
+                    count += 1
+        if count > 0:
+            logger.info(f"Limpieza completada. Se eliminaron {count} archivo(s) temporal(es) antiguo(s).")
+    except Exception as e:
+        logger.error(f"Error durante la limpieza de temporales de triaje: {e}")
