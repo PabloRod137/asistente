@@ -195,3 +195,82 @@ Para reconfigurar el bot para otro cliente:
 1. Edita [`system_prompt.txt`](file:///c:/proyectos/automatizacion/EjercitoDeBots/asistente/system_prompt.txt).
 2. Modifica la **Identidad** (ej. *Max el Game Master* o *Sofía la recepcionista*), el **Negocio** (dirección, catálogo de servicios, precios) y las **Reglas de Comunicación**.
 3. Guarda el archivo y reinicia el servicio. La Inteligencia Artificial adoptará los nuevos parámetros de forma inmediata sin alterar la lógica de programación del sistema.
+
+---
+
+## 🔑 Integración con Microsoft 365 (Graph API)
+
+Maira utiliza la API de Microsoft Graph para centralizar la autenticación y gestionar documentos en SharePoint, correos en Outlook y eventos en el calendario.
+
+### 📝 Registro de la Aplicación en Azure AD
+Para permitir que el bot interactúe con el tenant de Microsoft 365, es necesario registrar una aplicación en Azure Portal:
+
+1. **Crear Registro**:
+   - Vaya a [Azure Portal](https://portal.azure.com/) > **Microsoft Entra ID** (anteriormente Azure Active Directory) > **App registrations** > **New registration**.
+   - Asigne un nombre a la aplicación (ej. `Maira-Chatbot`).
+   - Seleccione los tipos de cuenta soportados (normalmente "Accounts in this organizational directory only").
+   - Haga clic en **Register**.
+
+2. **Permisos de API (API permissions)**:
+   - En el menú lateral izquierdo, seleccione **API permissions** > **Add a permission** > **Microsoft Graph**.
+   - Seleccione **Application permissions** (Permisos de aplicación, ya que el bot actúa en segundo plano sin intervención humana).
+   - Busque y marque los siguientes permisos:
+     - `Files.ReadWrite.All` (Para almacenar facturas e imágenes de tickets en SharePoint).
+     - `Mail.Send` (Para enviar emails con Outlook).
+     - `Calendars.ReadWrite` (Para agendar y cancelar citas).
+   - Haga clic en **Add permissions**.
+   - **CRÍTICO**: El administrador del tenant debe pulsar en **Grant admin consent for [Nombre del Tenant]** para activar los permisos.
+
+3. **Certificados y Secretos (Certificates & secrets)**:
+   - Vaya a **Certificates & secrets** > **Client secrets** > **New client secret**.
+   - Añada una descripción, establezca el vencimiento recomendado y pulse **Add**.
+   - **Copie inmediatamente el "Value" del secreto**. Este valor no volverá a mostrarse y se configurará como `MS_CLIENT_SECRET`.
+
+4. **Obtener IDs**:
+   - Vaya a **Overview** y copie:
+     - `Application (client) ID` (se configurará como `MS_CLIENT_ID`).
+     - `Directory (tenant) ID` (se configurará como `MS_TENANT_ID`).
+
+5. **Obtener MS_SITE_ID**:
+   - Puede obtener el ID de su sitio de SharePoint realizando una petición a:
+     `GET https://graph.microsoft.com/v1.0/sites/{domain}.sharepoint.com:/sites/{site-name}`
+     El ID obtenido tiene el formato `{domain}.sharepoint.com,{site-id},{web-id}`.
+
+---
+
+## ⚠️ Reconciliación tras Fallback Local (Nota Operativa)
+
+Si Microsoft Graph no está disponible (red, credenciales incorrectas, expiración, etc.), Maira activará de forma automática el **fallback local/SMTP/simulado**:
+- Las facturas y fotos de tickets de gasto se guardarán localmente en la carpeta local `/storage`.
+- Los emails se enviarán vía SMTP.
+- La agenda de citas utilizará la simulación en memoria.
+
+> [!IMPORTANT]
+> **Acción del Administrador**: Tras restablecer la conexión con Graph, los archivos guardados localmente durante la caída **no se sincronizan de manera automática**. El gestor técnico de IT debe revisar la carpeta `/storage` del servidor y subir manualmente a la biblioteca de SharePoint correspondiente los archivos guardados para evitar asincronías.
+
+---
+
+## 📋 Alta de un nuevo cliente (gestoría)
+
+Para desplegar Maira para una nueva gestoría, sin tocar código:
+
+### Microsoft 365
+- [ ] Registrar una app en Azure AD del tenant del cliente (o de Pimia, según el modelo de contrato) siguiendo los pasos de "Integración con Microsoft 365 (Graph API)".
+- [ ] Rellenar las variables `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_SITE_ID` y `MS_DRIVE_ID` en el archivo `.env`.
+- [ ] Ajustar `SHAREPOINT_CARPETA_FACTURAS` y `SHAREPOINT_CARPETA_TICKETS` si el cliente usa una convención de carpetas distinta.
+
+### Datos fiscales y de negocio
+- [ ] Configurar las variables `FACTURA_EMISOR_*` (nombre, CIF, dirección e IBAN del emisor de facturas).
+- [ ] Configurar `GESTOR_WHATSAPP` y `GESTOR_EMAIL` (datos de contacto del gestor humano responsable).
+- [ ] Configurar `PROFESIONAL_EMAIL` y `PROFESIONAL_WHATSAPP` si aplica el módulo de triaje de averías.
+- [ ] Configurar `BRIEFING_HORA` (hora a la que se enviará el resumen matutino).
+
+### Base de conocimiento
+- [ ] Sustituir `knowledge.txt` / `knowledge.pdf` con la información específica del cliente (horarios, servicios, ubicación, FAQ).
+- [ ] Revisar `system_prompt.txt` si el tono o el nombre del asistente cambia por cliente.
+
+### Módulos activos
+- [ ] Revisar qué variables `MODULO_[X]` activar o desactivar según el plan contratado por la gestoría (agenda, tickets, facturas, triaje, cobrador, etc.).
+
+### Base de datos
+- [ ] Confirmar que se arranca con una base de datos limpia (`chatbot.db` nuevo), no la de otro cliente ni la de desarrollo/pruebas.
