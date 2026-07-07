@@ -159,6 +159,23 @@ def init_db():
         )
     ''')
     
+    # Tabla gastos_tickets
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS gastos_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            cif_emisor TEXT,
+            emisor TEXT NOT NULL,
+            fecha TEXT,
+            base_imponible REAL NOT NULL,
+            porcentaje_iva REAL NOT NULL,
+            cuota_iva REAL NOT NULL,
+            total REAL NOT NULL,
+            ruta_imagen TEXT,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     conn.commit()
     
     # Ejecutar la migración de autoincrement sobre la tabla facturas si fuese necesario
@@ -247,3 +264,42 @@ def save_factura(destinatario: str, cif: str, concepto: str, importe: float) -> 
     conn.commit()
     conn.close()
     return factura_id
+
+# Funciones de utilidad para gastos (Tickets)
+def save_gasto(phone_number: str, emisor: str, cif_emisor: str, fecha: str, base_imponible: float, porcentaje_iva: int, cuota_iva: float, total: float, ruta_imagen: str) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO gastos_tickets (phone_number, emisor, cif_emisor, fecha, base_imponible, porcentaje_iva, cuota_iva, total, ruta_imagen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (phone_number, emisor, cif_emisor, fecha, base_imponible, porcentaje_iva, cuota_iva, total, ruta_imagen))
+    gasto_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return gasto_id
+
+def get_gastos_by_cif(cif_emisor: str, limit: int = 1000) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT emisor, cif_emisor, fecha, base_imponible, porcentaje_iva, cuota_iva, total, ruta_imagen, creado_en FROM gastos_tickets
+        WHERE UPPER(cif_emisor) = ?
+        ORDER BY fecha DESC, creado_en DESC
+        LIMIT ?
+    ''', (cif_emisor.strip().upper(), limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "emisor": row[0],
+            "cif_emisor": row[1],
+            "fecha": row[2],
+            "base_imponible": row[3],
+            "porcentaje_iva": row[4],
+            "cuota_iva": row[5],
+            "total": row[6],
+            "ruta_imagen": row[7],
+            "creado_en": row[8]
+        }
+        for row in rows
+    ]

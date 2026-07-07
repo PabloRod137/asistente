@@ -8,6 +8,8 @@ import openpyxl
 from openpyxl import Workbook
 from google import genai
 from google.genai import types
+import database
+import storage_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +24,10 @@ def sanitizar_nombre_archivo(texto):
     s = re.sub(r'[^a-zA-Z0-9_\-]', '', s)
     return s if s else "desconocido"
 
-def guardar_registro_excel(temp_image_path: str, datos: dict) -> tuple[str, str]:
+def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos: dict) -> int:
     """
-    Guarda la imagen de ticket y registra los datos en el excel correspondiente del cliente.
+    Guarda la imagen de ticket en SharePoint/Local y registra los datos en SQLite.
     """
-    storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
     cif_cliente = os.getenv("FACTURA_EMISOR_CIF", "general").strip().upper()
     cif_sanitizado = sanitizar_nombre_archivo(cif_cliente)
     
@@ -40,61 +41,43 @@ def guardar_registro_excel(temp_image_path: str, datos: dict) -> tuple[str, str]
         yyyy_mm = ahora.strftime("%Y-%m")
         fecha_archivo = ahora.strftime("%Y-%m-%d")
         
-    dest_dir = os.path.join(storage_ruta, cif_sanitizado, yyyy_mm)
-    os.makedirs(dest_dir, exist_ok=True)
-    
     emisor_san = sanitizar_nombre_archivo(datos.get("emisor", "desconocido"))
     total = datos.get("total", 0.0)
     total_str = f"{total:.2f}".replace(".", "-")
     nombre_imagen = f"{fecha_archivo}_{emisor_san}_{total_str}.jpg"
     
-    dest_image_path = os.path.join(dest_dir, nombre_imagen)
-    shutil.copy2(temp_image_path, dest_image_path)
-    logger.info(f"Imagen del ticket copiada a: {dest_image_path}")
+    # Ruta lógica del ticket en storage
+    carpeta_tickets = os.getenv("SHAREPOINT_CARPETA_TICKETS", "gastos_clientes").strip("/")
+    logical_image_path = f"{carpeta_tickets}/{cif_sanitizado}/{yyyy_mm}/{nombre_imagen}"
     
-    # 2. Registrar en Excel
-    excel_dir = os.path.join(storage_ruta, cif_sanitizado)
-    os.makedirs(excel_dir, exist_ok=True)
-    excel_path = os.path.join(excel_dir, f"gastos_{cif_sanitizado}.xlsx")
-    
-    headers = [
-        "Fecha", "Emisor", "CIF Emisor", "Base Imponible", 
-        "% IVA", "Cuota IVA", "Total", "Ruta Archivo", "Fecha Registro"
-    ]
-    
-    if os.path.exists(excel_path):
-        try:
-            wb = openpyxl.load_workbook(excel_path)
-            ws = wb.active
-        except Exception as e:
-            logger.error(f"Error cargando Excel {excel_path}: {e}. Creando nuevo.")
-            wb = Workbook()
-            ws = wb.active
-            ws.append(headers)
-    else:
-        wb = Workbook()
-        ws = wb.active
-        ws.append(headers)
+    # Leer bytes del archivo de imagen temporal
+    with open(temp_image_path, "rb") as f:
+        img_bytes = f.read()
         
-    fecha = datos.get("fecha") or ""
-    emisor = datos.get("emisor") or ""
+    # Guardar en storage_adapter
+    storage_adapter.guardar_archivo(logical_image_path, img_bytes)
+    logger.info(f"Imagen del ticket guardada en storage ({logical_image_path})")
+    
+    # 2. Registrar en base de datos SQLite
+    emisor = datos.get("emisor") or "Desconocido"
     cif_emisor = datos.get("cif_emisor") or ""
     base = datos.get("base_imponible", 0.0)
     porcentaje_iva = datos.get("porcentaje_iva", 0)
     cuota = datos.get("cuota_iva", 0.0)
-    total = datos.get("total", 0.0)
-    fecha_registro = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    row_data = [
-        fecha, emisor, cif_emisor, base, 
-        porcentaje_iva, cuota, total, dest_image_path, fecha_registro
-    ]
-    
-    ws.append(row_data)
-    wb.save(excel_path)
-    logger.info(f"Registro añadido correctamente en Excel: {excel_path}")
-    
-    return dest_image_path, excel_path
+    gasto_id = database.save_gasto(
+        phone_number=phone_number,
+        emisor=emisor,
+        cif_emisor=cif_emisor,
+        fecha=fecha_str or fecha_archivo,
+        base_imponible=base,
+        porcentaje_iva=porcentaje_iva,
+        cuota_iva=cuota,
+        total=total,
+        ruta_imagen=logical_image_path
+    )
+    logger.info(f"Gasto registrado en la base de datos con ID {gasto_id}")
+    return gasto_id
 
 def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
     """
@@ -232,11 +215,11 @@ def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
         datos = ticket_session["datos"]
         
         try:
-            guardar_registro_excel(temp_path, datos)
-            respuesta = "¡Ticket guardado y registrado con éxito en tu Excel de gastos! ✅"
+            guardar_registro_gasto(phone_number, temp_path, datos)
+            respuesta = "¡Ticket guardado y registrado con éxito! ✅"
         except Exception as e:
-            logger.error(f"Error guardando ticket en Excel: {e}")
-            respuesta = f"Ha ocurrido un error al guardar el registro en Excel: {e}"
+            logger.error(f"Error guardando ticket en la base de datos: {e}")
+            respuesta = f"Ha ocurrido un error al registrar el gasto: {e}"
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

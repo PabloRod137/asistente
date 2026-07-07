@@ -63,6 +63,7 @@ def procesar_comando(phone_number: str, message: str) -> str:
             "• `/pendientes` - Lista clientes con pendientes para el gestor.\n"
             "• `/actualizar` - Añadir nueva información a la base de conocimiento.\n"
             "• `/stats` - Estadísticas del negocio este mes.\n"
+            "• `/exportar_gastos {cif}` - Exportar gastos de un CIF a Excel en SharePoint.\n"
             "• `/responder_{id} {mensaje}` - Responder a un ticket de escalado.\n\n"
             "💼 *Comandos de Agenda Interna (Secretaria):*\n"
             "• `/agenda` - Tareas, citas y recordatorios de hoy y mañana.\n"
@@ -210,7 +211,11 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         cursor.execute("SELECT COUNT(*) FROM conversaciones WHERE inicio >= date('now', 'start of month')")
         convs_month = cursor.fetchone()[0]
         
-        # Tickets escalados pendientes
+        # Tickets de gastos registrados
+        cursor.execute("SELECT COUNT(*) FROM gastos_tickets")
+        gastos_count = cursor.fetchone()[0]
+        
+        # Tickets de escalado pendientes
         cursor.execute("SELECT COUNT(*) FROM tickets_escalados WHERE estado = 'pendiente'")
         tickets_pend = cursor.fetchone()[0]
         
@@ -221,8 +226,65 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             f"• *Conversaciones este mes:* {convs_month}\n"
             f"• *Citas activas agendadas:* {citas_count}\n"
             f"• *Facturas comerciales emitidas:* {facturas_count}\n"
+            f"• *Tickets de gastos registrados:* {gastos_count}\n"
             f"• *Tickets de escalado pendientes:* {tickets_pend}"
         )
+
+    # --- COMANDO: /exportar_gastos ---
+    elif cmd == "/exportar_gastos":
+        cif = args.strip().upper()
+        if not cif:
+            return "Uso: `/exportar_gastos {cif}`. Ejemplo: `/exportar_gastos B12345678`"
+            
+        gastos = database.get_gastos_by_cif(cif)
+        if not gastos:
+            return f"No se encontraron gastos registrados para el CIF: {cif}."
+            
+        import openpyxl
+        from openpyxl import Workbook
+        import io
+        import storage_adapter
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Gastos"
+        
+        headers = [
+            "Fecha", "Emisor", "CIF Emisor", "Base Imponible", 
+            "% IVA", "Cuota IVA", "Total", "Ruta Archivo", "Fecha Registro"
+        ]
+        ws.append(headers)
+        
+        for g in gastos:
+            ws.append([
+                g["fecha"],
+                g["emisor"],
+                g["cif_emisor"],
+                g["base_imponible"],
+                g["porcentaje_iva"],
+                g["cuota_iva"],
+                g["total"],
+                g["ruta_imagen"],
+                g["creado_en"]
+            ])
+            
+        # Guardar en memoria
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_bytes = excel_buffer.getvalue()
+        
+        # Subir mediante el storage_adapter
+        carpeta_tickets = os.getenv("SHAREPOINT_CARPETA_TICKETS", "gastos_clientes").strip("/")
+        fecha_exp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"gastos_{cif}_{fecha_exp}.xlsx"
+        logical_path = f"{carpeta_tickets}/{cif}/{filename}"
+        
+        try:
+            storage_adapter.guardar_archivo(logical_path, excel_bytes)
+            return f"Excel de gastos para el CIF {cif} exportado con éxito en: {logical_path} ✅"
+        except Exception as e:
+            logger.error(f"Error al subir Excel de gastos a SharePoint: {e}")
+            return f"Error al subir el Excel de gastos a SharePoint: {e} ❌"
 
     # --- COMANDO: /agenda ---
     elif cmd == "/agenda":

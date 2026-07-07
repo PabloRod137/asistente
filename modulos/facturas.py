@@ -297,29 +297,38 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     # Ruta temporal para guardar PDF
     storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
     pdf_filename = f"Factura_{num_factura:05d}.pdf"
-    pdf_path = os.path.join(storage_ruta, "facturas_emitidas", pdf_filename)
+    temp_pdf_path = os.path.join(storage_ruta, "temp", pdf_filename)
     
     try:
-        # Generar PDF
+        # Generar PDF localmente en la carpeta temp
         generar_factura_pdf(num_factura, emisor, {
             "nombre": destinatario,
             "cif": cif,
             "email": email_dest
-        }, concepto, base, iva_pct, total, pdf_path)
+        }, concepto, base, iva_pct, total, temp_pdf_path)
+        
+        # Leer bytes y guardar mediante storage_adapter
+        with open(temp_pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+            
+        import storage_adapter
+        carpeta_facturas = os.getenv("SHAREPOINT_CARPETA_FACTURAS", "facturas_emitidas").strip("/")
+        logical_path = f"{carpeta_facturas}/{pdf_filename}"
+        storage_adapter.guardar_archivo(logical_path, pdf_bytes)
         
         # Subir media a WhatsApp
-        media_id = whatsapp.upload_whatsapp_media(pdf_path, "application/pdf")
+        media_id = whatsapp.upload_whatsapp_media(temp_pdf_path, "application/pdf")
         
         if media_id:
             # Enviar por WhatsApp
             whatsapp.send_whatsapp_document(phone_number, media_id, pdf_filename)
             respuesta = f"¡Factura Nº {num_factura:05d} generada correctamente y enviada! 📄"
         else:
-            respuesta = f"Se ha generado la factura física en el servidor, pero no se ha podido subir a WhatsApp. (Ruta: {pdf_path})"
+            respuesta = f"Se ha generado la factura física en el storage ({logical_path}), pero no se ha podido subir a WhatsApp."
             
         # Enviar copia por email opcional
         if email_dest:
-            enviar_factura_email(email_dest, pdf_path, num_factura)
+            enviar_factura_email(email_dest, temp_pdf_path, num_factura)
             respuesta += f" Además se ha enviado una copia por correo a {email_dest}."
             
         return respuesta
