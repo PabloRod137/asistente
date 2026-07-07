@@ -128,42 +128,22 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     logger.info(f"PDF de factura generado correctamente en: {filepath}")
 
 def enviar_factura_email(email_destino: str, filepath: str, num_factura: int) -> bool:
-    email_emisor = os.getenv("EMAIL_EMISOR")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = os.getenv("SMTP_PORT", "587")
-    
-    if not email_emisor or not smtp_password:
-        logger.warning("Falta configurar EMAIL_EMISOR o SMTP_PASSWORD. No se puede enviar email.")
-        return False
-        
+    import email_adapter
+    asunto = f"Factura Nº {num_factura:05d}"
+    cuerpo = f"Hola,\n\nTe adjuntamos la factura correspondiente Nº {num_factura:05d}.\n\nSaludos."
+    adjuntos = [
+        {
+            "filepath": filepath,
+            "filename": f"Factura_{num_factura:05d}.pdf"
+        }
+    ]
     try:
-        msg = MIMEMultipart()
-        msg["From"] = email_emisor
-        msg["To"] = email_destino
-        msg["Subject"] = f"Factura Nº {num_factura:05d}"
-        
-        cuerpo = f"Hola,\n\nTe adjuntamos la factura correspondiente Nº {num_factura:05d}.\n\nSaludos."
-        msg.attach(MIMEText(cuerpo, "plain"))
-        
-        # Adjuntar PDF
-        with open(filepath, "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                "Content-Disposition",
-                f"attachment; filename=Factura_{num_factura:05d}.pdf",
-            )
-            msg.attach(part)
-            
-        server = smtplib.SMTP(smtp_server, int(smtp_port))
-        server.starttls()
-        server.login(email_emisor, smtp_password)
-        server.sendmail(email_emisor, email_destino, msg.as_string())
-        server.quit()
-        logger.info(f"Email con factura enviado con éxito a {email_destino}")
-        return True
+        return email_adapter.enviar_email(
+            destinatario=email_destino,
+            asunto=asunto,
+            cuerpo_texto=cuerpo,
+            adjuntos=adjuntos
+        )
     except Exception as e:
         logger.error(f"Error enviando factura por email: {e}")
         return False

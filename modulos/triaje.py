@@ -18,14 +18,11 @@ logger = logging.getLogger(__name__)
 _triaje_sesiones = {}
 
 def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> bool:
-    email_emisor = os.getenv("EMAIL_EMISOR")
-    email_profesional = os.getenv("PROFESIONAL_EMAIL")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = os.getenv("SMTP_PORT", "587")
+    import email_adapter
     
-    if not email_emisor or not email_profesional or not smtp_password:
-        logger.warning("Falta configuración de Email para notificar al profesional.")
+    email_profesional = os.getenv("PROFESIONAL_EMAIL")
+    if not email_profesional:
+        logger.warning("Falta configuración de PROFESIONAL_EMAIL para notificar al profesional.")
         return False
         
     try:
@@ -36,11 +33,6 @@ def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> boo
         justificacion = datos_ia.get("justificacion_complejidad", "")
         
         asunto = f"Nueva Solicitud [{urgencia}] — [{categoria}] — CP {datos.get('cp')}"
-        
-        msg = MIMEMultipart("related")
-        msg["Subject"] = asunto
-        msg["From"] = email_emisor
-        msg["To"] = email_profesional
         
         html_body = f"""
         <html>
@@ -75,6 +67,7 @@ def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> boo
             </table>
         """
         
+        adjuntos = []
         if foto_path and os.path.exists(foto_path):
             html_body += """
             <div style="margin-top: 20px;">
@@ -82,28 +75,24 @@ def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> boo
                 <img src="cid:foto_triaje" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;" />
             </div>
             """
+            adjuntos.append({
+                "filepath": foto_path,
+                "filename": os.path.basename(foto_path),
+                "content_id": "foto_triaje",
+                "is_inline": True
+            })
             
         html_body += """
         </body>
         </html>
         """
         
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
-        
-        if foto_path and os.path.exists(foto_path):
-            with open(foto_path, 'rb') as img_file:
-                msg_image = MIMEImage(img_file.read())
-                msg_image.add_header('Content-ID', '<foto_triaje>')
-                msg_image.add_header('Content-Disposition', 'inline', filename=os.path.basename(foto_path))
-                msg.attach(msg_image)
-                
-        server = smtplib.SMTP(smtp_server, int(smtp_port))
-        server.starttls()
-        server.login(email_emisor, smtp_password)
-        server.sendmail(email_emisor, email_profesional, msg.as_string())
-        server.quit()
-        logger.info(f"Notificación de Email enviada correctamente a {email_profesional}")
-        return True
+        return email_adapter.enviar_email(
+            destinatario=email_profesional,
+            asunto=asunto,
+            cuerpo_html=html_body,
+            adjuntos=adjuntos
+        )
     except Exception as e:
         logger.error(f"Error enviando email al profesional: {e}")
         return False
