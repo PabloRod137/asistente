@@ -1,5 +1,6 @@
 import os
 import logging
+import requests
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -20,25 +21,109 @@ def _get_google_client():
     service = build('calendar', 'v3', credentials=creds)
     return service
 
-def _get_outlook_account():
-    from O365 import Account, MSOffice365Protocol
-    
-    tenant_id = os.getenv("O365_TENANT_ID")
-    client_id = os.getenv("O365_CLIENT_ID")
-    client_secret = os.getenv("O365_CLIENT_SECRET")
-    
-    if not tenant_id or not client_id or not client_secret:
-        raise ValueError("Faltan credenciales de O365 (tenant_id, client_id, client_secret)")
+def _get_outlook_events(date_str: str) -> list:
+    import graph_auth
+    email_emisor = os.getenv("EMAIL_EMISOR")
+    if not email_emisor:
+        raise ValueError("Falta configurar EMAIL_EMISOR para obtener eventos de calendario.")
         
-    credentials = (client_id, client_secret)
-    protocol = MSOffice365Protocol()
-    account = Account(credentials, auth_flow_type='credentials', tenant_id=tenant_id, protocol=protocol)
+    token = graph_auth.get_access_token()
     
-    if not account.is_authenticated:
-        if not account.authenticate():
-            raise RuntimeError("Fallo en la autenticación de O365")
+    # Rango de fecha: desde las 00:00:00 del día hasta las 23:59:59
+    start_dt = f"{date_str}T00:00:00"
+    end_dt = f"{date_str}T23:59:59"
+    
+    url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/calendar/calendarView"
+    params = {
+        "startDateTime": start_dt,
+        "endDateTime": end_dt,
+        "$select": "subject,start,end",
+        "$top": 1000
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Prefer": 'outlook.timezone="Europe/Madrid"'
+    }
+    
+    logger.info(f"Obteniendo calendarView de Graph para {date_str}...")
+    res = requests.get(url, headers=headers, params=params, timeout=15)
+    res.raise_for_status()
+    
+    events = []
+    for item in res.json().get("value", []):
+        start_val = item["start"]["dateTime"]
+        end_val = item["end"]["dateTime"]
+        try:
+            clean_start = start_val.split('.')[0]
+            clean_end = end_val.split('.')[0]
+            dt_start = datetime.fromisoformat(clean_start)
+            dt_end = datetime.fromisoformat(clean_end)
+            events.append((dt_start, dt_end))
+        except Exception as e:
+            logger.warning(f"Error parseando fechas del evento de Outlook: {e}")
             
-    return account
+    return events
+
+def _create_outlook_event(title: str, start: str, end: str, attendee_email: str = None) -> str:
+    import graph_auth
+    email_emisor = os.getenv("EMAIL_EMISOR")
+    if not email_emisor:
+        raise ValueError("Falta configurar EMAIL_EMISOR para crear eventos en el calendario.")
+        
+    token = graph_auth.get_access_token()
+    url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/calendar/events"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "subject": title,
+        "start": {
+            "dateTime": start,
+            "timeZone": "Europe/Madrid"
+        },
+        "end": {
+            "dateTime": end,
+            "timeZone": "Europe/Madrid"
+        }
+    }
+    
+    if attendee_email:
+        payload["attendees"] = [
+            {
+                "emailAddress": {
+                    "address": attendee_email
+                },
+                "type": "required"
+            }
+        ]
+        
+    logger.info(f"Creando evento en el calendario de Outlook para {email_emisor}...")
+    res = requests.post(url, headers=headers, json=payload, timeout=15)
+    res.raise_for_status()
+    
+    return res.json().get("id")
+
+def _cancel_outlook_event(event_id: str) -> bool:
+    import graph_auth
+    email_emisor = os.getenv("EMAIL_EMISOR")
+    if not email_emisor:
+        raise ValueError("Falta configurar EMAIL_EMISOR para cancelar eventos en el calendario.")
+        
+    token = graph_auth.get_access_token()
+    url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/calendar/events/{event_id}"
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    logger.info(f"Cancelando evento de Outlook {event_id}...")
+    res = requests.delete(url, headers=headers, timeout=15)
+    res.raise_for_status()
+    return True
 
 def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
     """
@@ -48,7 +133,7 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
     calendar_tipo = os.getenv("CALENDAR_TIPO", "outlook").strip().lower()
     logger.info(f"Obteniendo huecos libres para {date_str} usando {calendar_tipo}")
     
-    # 1. Definir los huecos de trabajo posibles (ej: de 09:00 a 18:00 cada 'duration_minutes')
+    # 1. Definir los huecos de trabajo posibles (de 09:00 a 18:00 cada 'duration_minutes')
     try:
         base_date = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -92,8 +177,6 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
             for event in events_result.get('items', []):
                 start_str = event['start'].get('dateTime') or event['start'].get('date')
                 end_str = event['end'].get('dateTime') or event['end'].get('date')
-                # Parsear fechas de Google (ej: '2026-05-28T10:00:00+02:00')
-                # Simplificamos asumiendo la zona horaria local o cortando para comparar
                 try:
                     start_dt = datetime.fromisoformat(start_str.split('+')[0].split('Z')[0])
                     end_dt = datetime.fromisoformat(end_str.split('+')[0].split('Z')[0])
@@ -106,27 +189,17 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
             
     elif calendar_tipo == "outlook":
         try:
-            account = _get_outlook_account()
-            schedule = account.schedule()
-            calendar = schedule.get_default_calendar()
-            
-            # Definir rango
-            q = calendar.new_query()
-            q.datetime_custom('start').greater_equal(base_date)
-            q.datetime_custom('end').less_equal(base_date + timedelta(days=1))
-            
-            outlook_events = calendar.get_events(query=q, include_recurring=True)
-            for event in outlook_events:
-                # O365 datetime objects son timezone aware o naive dependiento de la config, los convertimos a naive locales
-                start_dt = event.start.replace(tzinfo=None)
-                end_dt = event.end.replace(tzinfo=None)
-                events.append((start_dt, end_dt))
+            events = _get_outlook_events(date_str)
         except Exception as e:
-            logger.warning(f"Error conectando con Outlook Calendar: {e}. Usando simulación.")
+            logger.warning(
+                f"FALLBACK CALENDARIO: Error conectando con Outlook Calendar vía Graph API: {e}. "
+                f"Cayendo automáticamente a simulación en memoria.", 
+                exc_info=True
+            )
             use_fallback = True
     else:
         use_fallback = True
-
+ 
     if use_fallback:
         # Usar la lista de eventos simulados
         for ev_id, ev_info in _simulated_events.items():
@@ -191,25 +264,18 @@ def create_event(title: str, start: str, end: str, attendee_email: str = None) -
             
     elif calendar_tipo == "outlook":
         try:
-            account = _get_outlook_account()
-            schedule = account.schedule()
-            calendar = schedule.get_default_calendar()
-            
-            new_event = calendar.new_event()
-            new_event.subject = title
-            new_event.start = datetime.fromisoformat(start)
-            new_event.end = datetime.fromisoformat(end)
-            if attendee_email:
-                new_event.attendees.add(attendee_email)
-                
-            new_event.save()
+            event_id = _create_outlook_event(title, start, end, attendee_email)
             return {
-                "id": new_event.object_id,
+                "id": event_id,
                 "status": "success",
                 "tipo": "outlook"
             }
         except Exception as e:
-            logger.warning(f"Error creando evento en Outlook Calendar: {e}. Usando simulación.")
+            logger.warning(
+                f"FALLBACK CALENDARIO: Error creando evento en Outlook Calendar vía Graph API: {e}. "
+                f"Cayendo automáticamente a simulación en memoria.", 
+                exc_info=True
+            )
             use_fallback = True
     else:
         use_fallback = True
@@ -254,16 +320,9 @@ def cancel_event(event_id: str) -> bool:
             
     elif calendar_tipo == "outlook":
         try:
-            account = _get_outlook_account()
-            schedule = account.schedule()
-            calendar = schedule.get_default_calendar()
-            event = calendar.get_event(event_id)
-            if event:
-                event.delete()
-                return True
-            return False
+            return _cancel_outlook_event(event_id)
         except Exception as e:
-            logger.error(f"Error cancelando evento en Outlook Calendar: {e}")
+            logger.error(f"Error cancelando evento en Outlook Calendar vía Graph API: {e}")
             return False
             
     return False
