@@ -23,7 +23,7 @@ def run_test():
             logger.info(f"Primer slot: {slots[0]}")
             
         logger.info("--- Probando creación de evento ---")
-        title = "Reunión de prueba"
+        title = "[PRUEBA] Reunión de test"
         start_time = "2026-07-08T10:00:00"
         end_time = "2026-07-08T11:00:00"
         res = calendar_adapter.create_event(title, start_time, end_time, "cliente@test.com")
@@ -61,7 +61,7 @@ def run_test():
         
         logger.info("Creando evento con credenciales inválidas (debería dar warning de fallback)...")
         res_fallback = calendar_adapter.create_event(
-            "Cita Fallback", "2026-07-09T12:00:00", "2026-07-09T13:00:00"
+            "[PRUEBA] Cita Fallback", "2026-07-09T12:00:00", "2026-07-09T13:00:00"
         )
         logger.info(f"Evento fallback creado: {res_fallback}")
         assert res_fallback["tipo"] == "simulated", "El tipo de evento creado no es 'simulated' tras fallback!"

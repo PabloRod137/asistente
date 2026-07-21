@@ -1,0 +1,79 @@
+# knowledge.txt — LexGuardian
+
+## Quiénes somos
+
+LexGuardian es un despacho familiar de asesoría legal, fiscal y laboral con tres 
+generaciones ofreciendo servicios en Santander desde 1961. Su lema es "No solo resolvemos 
+problemas, los prevenimos."
+
+Socios:
+- Alberto Berdejo Payno — Economista, Máster en Administración Concursal, miembro del 
+  Registro de Economistas Asesores Fiscales (REAF).
+- Juan Berdejo Payno — Abogado, Máster de la UC y la Escuela de Práctica Jurídica "Nobel 
+  Carral", Compliance Officer y Delegado de Protección de Datos acreditado por la AEPD.
+
+LexGuardian forma parte de ASCOM (Asociación Española de Compliance).
+
+Valores: compromiso con el cliente, experiencia multidisciplinar, confidencialidad y 
+confianza, resultados medibles.
+
+## A quién atienden
+
+- Startups y Pymes (asesoría legal integral desde el inicio)
+- Autónomos y profesionales (protección de actividad y patrimonio)
+- Asociaciones y ONGs (adaptado a su marco normativo)
+- Estructuras holding, fusiones y adquisiciones, due diligence
+- Comunidades de propietarios (gestión de conflictos y reclamaciones)
+- Familias (derecho civil, sucesorio y patrimonial)
+
+## Áreas de práctica
+
+- Asesoría Jurídica Empresarial
+- Derecho Fiscal y Tributario
+- Derecho Laboral y Seguridad Social
+- Derecho Civil, Sucesorio y Patrimonial
+- Defensa Legal, mediación y Litigación
+- Compliance y canal ético
+- Protección de datos (RGPD y LOPDGDD)
+
+## Servicios y precios (públicos en la web)
+
+| Servicio | Precio | Detalle |
+|---|---|---|
+| Consulta Jurídica | 80€/cita | Presencial. Constitución y gestión de sociedades, contratos mercantiles, cumplimiento normativo |
+| Servicio de Compliance | 60€ consulta inicial | Análisis de la empresa, identificación de riesgos, medidas de cumplimiento, asesoramiento continuo |
+| Protección de datos (RGPD/LOPDGDD) | 50€/cita | Auditoría inicial, redacción de cláusulas legales, políticas web, servicio de Delegado de Protección de Datos |
+| Registro de marcas y nombre | 150€ | — |
+| Declaración de la renta | 50€–75€ | Varía según variante/complejidad |
+| Administrador de Comunidades de Propietarios | 50€ | Cantabria |
+| Consulta de Asesoría (presencial) | 80€ | — |
+| Compra segura de vivienda | 390€ | Asesoría legal en compraventa inmobiliaria |
+
+## Servicio de cartelera inmobiliaria (fuera del flujo jurídico habitual)
+
+LexGuardian también publica en su blog anuncios de inmuebles en venta (pisos, terrenos) en 
+Santander y Cantabria. Esto es un servicio distinto de la asesoría legal — si preguntan por 
+un inmueble concreto, remitir a la web/blog o al equipo, no tratarlo como consulta jurídica.
+
+## Contacto y ubicación
+
+- Dirección: C/ Lealtad, 19 – 1º C, 39002 Santander (Cantabria)
+- Email: info@lexguardian.com
+- Teléfono: 693 577 126
+- Web: https://www.lexguardian.com
+- Reserva de citas online: https://www.lexguardian.com/solicita-una-cita/
+
+## Horario de atención
+
+[PENDIENTE DE CONFIRMAR CON EL CLIENTE — no está publicado en la web]
+
+## Plazos fiscales próximos
+
+[Esta sección se irá completando por el gestor a través del comando /plazo_fiscal, o se 
+rellenará manualmente al inicio con los plazos conocidos del ejercicio en curso]
+
+## Notas internas para el equipo (no compartir con clientes salvo que se pregunte)
+
+- Portal del asesor (acceso interno con CEGID): 
+  https://berdejoasesores.portaldespacho.com/Login/#/login
+- Desarrollado originalmente por TECNINORTE (proveedor web anterior, no relacionado con Maira)

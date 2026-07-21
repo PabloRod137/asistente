@@ -93,11 +93,19 @@ def run_tests():
     # Probar la exportación a Excel
     logger.info("\n================ PROBANDO EXPORTACIÓN A EXCEL ================")
     import gestor_mode
+    import storage_adapter
     # Exportar para uno de los CIFs que acabamos de registrar
     cif_test = "A12345671"
     res = gestor_mode.procesar_comando("34612345678", f"/exportar_gastos {cif_test}")
     logger.info(f"Resultado de exportación: {res}")
     assert "exportado con éxito" in res, f"Fallo al exportar gastos: {res}"
+    
+    # Limpiar el archivo de Excel de prueba exportado a SharePoint/local
+    if "éxito a: " in res:
+        path_exportado = res.split("éxito a: ")[-1].strip()
+        logger.info(f"--- Limpiando Excel de prueba exportado ({path_exportado}) ---")
+        storage_adapter.eliminar_archivo(path_exportado)
+
     logger.info("¡Prueba de concurrencia y exportación completada con éxito absoluto!")
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ def run_test():
     
     # 1. Test normal write and read
     test_content = b"Prueba de contenido para almacenamiento"
-    test_path = "facturas_emitidas/factura_test_123.txt"
+    test_path = "facturas_emitidas/test_factura_123.txt"
     
     logger.info("--- Probando escritura normal ---")
     try:
@@ -30,6 +30,10 @@ def run_test():
         logger.info("--- Probando listado ---")
         archivos = storage_adapter.listar_archivos("facturas_emitidas")
         logger.info(f"Archivos en facturas_emitidas: {archivos}")
+
+        logger.info("--- Limpiando archivo de prueba ---")
+        storage_adapter.eliminar_archivo(test_path)
+        logger.info(f"Archivo de prueba {test_path} eliminado del almacenamiento.")
         
     except Exception as e:
         logger.error(f"Fallo durante las pruebas de almacenamiento: {e}", exc_info=True)
@@ -46,7 +50,7 @@ def run_test():
     os.environ["MS_CLIENT_SECRET"] = "secret_invalido_de_prueba"
     
     fallback_content = b"Contenido de contingencia local"
-    fallback_path = "facturas_emitidas/factura_fallback.txt"
+    fallback_path = "facturas_emitidas/test_factura_fallback.txt"
     
     try:
         # Esto debería fallar en SharePoint y caer automáticamente a LocalStorageAdapter
@@ -62,10 +66,13 @@ def run_test():
         
         # Validar que existe físicamente en el disco local bajo storage/temp o storage/facturas_emitidas
         local_ruta = os.getenv("STORAGE_RUTA", "./storage")
-        physical_local_path = os.path.join(local_ruta, "facturas_emitidas", "factura_fallback.txt")
+        physical_local_path = os.path.join(local_ruta, "facturas_emitidas", "test_factura_fallback.txt")
         logger.info(f"Comprobando presencia física local en {physical_local_path}...")
         assert os.path.exists(physical_local_path), f"El archivo no se guardó físicamente en local: {physical_local_path}"
         logger.info("¡Verificación de fallback exitosa! El archivo está en el disco local.")
+
+        logger.info("--- Limpiando archivo de prueba fallback ---")
+        storage_adapter.eliminar_archivo(fallback_path)
         
     except Exception as e:
         logger.error(f"Fallo durante la prueba de fallback: {e}", exc_info=True)

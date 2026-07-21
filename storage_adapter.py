@@ -19,6 +19,10 @@ class StorageAdapter(ABC):
     def listar_archivos(self, carpeta_logica: str) -> list:
         pass
 
+    @abstractmethod
+    def eliminar_archivo(self, ruta_logica: str) -> bool:
+        pass
+
 class LocalStorageAdapter(StorageAdapter):
     def __init__(self):
         self.storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
@@ -47,6 +51,15 @@ class LocalStorageAdapter(StorageAdapter):
         if not os.path.exists(local_path) or not os.path.isdir(local_path):
             return []
         return os.listdir(local_path)
+
+    def eliminar_archivo(self, ruta_logica: str) -> bool:
+        ruta_logica_clean = ruta_logica.lstrip("/")
+        local_path = os.path.join(self.storage_ruta, *ruta_logica_clean.split("/"))
+        if os.path.exists(local_path):
+            os.remove(local_path)
+            logger.info(f"Archivo eliminado localmente: {local_path}")
+            return True
+        return False
 
 class SharePointStorageAdapter(StorageAdapter):
     def _get_base_url(self) -> str:
@@ -116,6 +129,27 @@ class SharePointStorageAdapter(StorageAdapter):
         items = res.json().get("value", [])
         return [item["name"] for item in items]
 
+    def eliminar_archivo(self, ruta_logica: str) -> bool:
+        token = graph_auth.get_access_token()
+        base_url = self._get_base_url()
+        path = ruta_logica.lstrip("/")
+        url = f"{base_url}:/{path}"
+        
+        headers = {
+            "Authorization": f"Bearer {token}"
+        }
+        
+        logger.info(f"Eliminando archivo en SharePoint: {path}")
+        res = requests.delete(url, headers=headers, timeout=30)
+        if res.status_code in (200, 204):
+            logger.info(f"Archivo eliminado con éxito de SharePoint: {path}")
+            return True
+        elif res.status_code == 404:
+            logger.warning(f"Archivo no encontrado para eliminar en SharePoint: {path}")
+            return False
+        res.raise_for_status()
+        return True
+
 # Instancias de los adaptadores
 _local_adapter = LocalStorageAdapter()
 _sharepoint_adapter = SharePointStorageAdapter()
@@ -166,3 +200,16 @@ def listar_archivos(carpeta_logica: str) -> list:
                 exc_info=True
             )
     return _local_adapter.listar_archivos(carpeta_logica)
+
+def eliminar_archivo(ruta_logica: str) -> bool:
+    tipo = os.getenv("STORAGE_TIPO", "local").strip().lower()
+    if tipo == "sharepoint":
+        try:
+            return _sharepoint_adapter.eliminar_archivo(ruta_logica)
+        except Exception as e:
+            logger.warning(
+                f"FALLBACK ALMACENAMIENTO: Error eliminando '{ruta_logica}' en SharePoint: {e}. "
+                f"Cayendo automáticamente a eliminación local.", 
+                exc_info=True
+            )
+    return _local_adapter.eliminar_archivo(ruta_logica)
