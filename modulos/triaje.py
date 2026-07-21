@@ -2,11 +2,8 @@ import os
 import re
 import json
 import logging
+import asyncio
 from datetime import datetime, timedelta
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
 from google import genai
 from google.genai import types
 import whatsapp
@@ -17,7 +14,7 @@ logger = logging.getLogger(__name__)
 # { phone_number: { "descripcion": "...", "cp": "...", "urgencia": "...", "foto_path": "...", "estado": "..." } }
 _triaje_sesiones = {}
 
-def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> bool:
+async def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> bool:
     import email_adapter
     
     email_profesional = os.getenv("PROFESIONAL_EMAIL")
@@ -87,7 +84,7 @@ def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> boo
         </html>
         """
         
-        return email_adapter.enviar_email(
+        return await email_adapter.enviar_email(
             destinatario=email_profesional,
             asunto=asunto,
             cuerpo_html=html_body,
@@ -97,7 +94,7 @@ def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> boo
         logger.error(f"Error enviando email al profesional: {e}")
         return False
 
-def analizar_solicitud_con_ia(datos: dict) -> dict:
+async def analizar_solicitud_con_ia(datos: dict) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return {
@@ -107,48 +104,50 @@ def analizar_solicitud_con_ia(datos: dict) -> dict:
             "justificacion_complejidad": "Sin API Key para análisis."
         }
         
-    client = genai.Client(api_key=api_key)
-    
-    prompt = f"""
-    Analiza la siguiente solicitud de presupuesto para un servicio comercial:
-    - Descripción: "{datos.get('descripcion')}"
-    - Código Postal: {datos.get('cp')}
-    - Urgencia: {datos.get('urgencia')}
-
-    Determina:
-    1. categoria: Clasifica en una de estas exactamente: fontanería, electricidad, carpintería, pintura, reformas generales, limpieza, jardinería, otro.
-    2. resumen: Resumen ejecutivo claro y técnico de 2-3 líneas para el profesional.
-    3. complejidad: bajo, medio o alto.
-    4. justificacion_complejidad: Una línea justificando el nivel asignado.
-
-    Devuelve ÚNICAMENTE un JSON válido con esta estructura:
-    {{
-        "categoria": "fontanería | electricidad | carpintería | pintura | reformas generales | limpieza | jardinería | otro",
-        "resumen": "Resumen...",
-        "complejidad": "bajo | medio | alto",
-        "justificacion_complejidad": "Justificación..."
-    }}
-    """
-    
-    contents = []
-    foto_path = datos.get("foto_path")
-    if foto_path and os.path.exists(foto_path):
-        with open(foto_path, 'rb') as f:
-            file_bytes = f.read()
-        part = types.Part.from_bytes(data=file_bytes, mime_type='image/jpeg')
-        contents.append(part)
-        
-    contents.append(prompt)
-    
     try:
-        respuesta = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+        def _call_gemini_vision_triaje():
+            client = genai.Client(api_key=api_key)
+            prompt = f"""
+            Analiza la siguiente solicitud de presupuesto para un servicio comercial:
+            - Descripción: "{datos.get('descripcion')}"
+            - Código Postal: {datos.get('cp')}
+            - Urgencia: {datos.get('urgencia')}
+
+            Determina:
+            1. categoria: Clasifica en una de estas exactamente: fontanería, electricidad, carpintería, pintura, reformas generales, limpieza, jardinería, otro.
+            2. resumen: Resumen ejecutivo claro y técnico de 2-3 líneas para el profesional.
+            3. complejidad: bajo, medio o alto.
+            4. justificacion_complejidad: Una línea justificando el nivel asignado.
+
+            Devuelve ÚNICAMENTE un JSON válido con esta estructura:
+            {{
+                "categoria": "fontanería | electricidad | carpintería | pintura | reformas generales | limpieza | jardinería | otro",
+                "resumen": "Resumen...",
+                "complejidad": "bajo | medio | alto",
+                "justificacion_complejidad": "Justificación..."
+            }}
+            """
+            
+            contents = []
+            foto_path = datos.get("foto_path")
+            if foto_path and os.path.exists(foto_path):
+                with open(foto_path, 'rb') as f:
+                    file_bytes = f.read()
+                part = types.Part.from_bytes(data=file_bytes, mime_type='image/jpeg')
+                contents.append(part)
+                
+            contents.append(prompt)
+            
+            respuesta = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
             )
-        )
-        return json.loads(respuesta.text.strip())
+            return json.loads(respuesta.text.strip())
+
+        return await asyncio.to_thread(_call_gemini_vision_triaje)
     except Exception as e:
         logger.error(f"Error analizando triaje con Gemini: {e}")
         return {
@@ -158,13 +157,12 @@ def analizar_solicitud_con_ia(datos: dict) -> dict:
             "justificacion_complejidad": "Fallo al conectar con Gemini."
         }
 
-def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") -> str:
+async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") -> str:
     """
-    Máquina de estados conversacional para el triaje.
+    Máquina de estados conversacional para el triaje de forma asíncrona.
     """
     session = _triaje_sesiones.get(phone_number)
     
-    # 0. Inicialización
     if not session:
         _triaje_sesiones[phone_number] = {
             "phone_number": phone_number,
@@ -179,13 +177,10 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
             "Por favor, describe en detalle qué avería o trabajo necesitas que realicemos (mínimo 20 caracteres):"
         )
 
-    # Si se recibe una foto en cualquier momento del triaje, guardarla y continuar
     if msg_type == "image":
-        # Nota: el archivo ya se descargó en main.py y se pasó como ruta en `message`
         session["foto_path"] = message
         logger.info(f"Foto de triaje guardada para {phone_number} en {message}")
         
-        # Le pedimos que continúe con el estado actual
         if session["estado"] == "esperando_descripcion":
             return "📸 ¡Foto recibida! Por favor, continúa describiendo detalladamente el trabajo que necesitas (mínimo 20 caracteres):"
         elif session["estado"] == "esperando_cp":
@@ -198,7 +193,6 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
                 "3. No urgente"
             )
 
-    # 1. Esperando descripción
     if session["estado"] == "esperando_descripcion":
         if len(message.strip()) < 20:
             return "La descripción debe tener al menos 20 caracteres para que el profesional pueda entenderla. Cuéntame un poco más:"
@@ -206,7 +200,6 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
         session["estado"] = "esperando_cp"
         return "Guardado. 📍 Facilítame ahora tu Código Postal (5 dígitos) de España:"
 
-    # 2. Esperando Código Postal
     elif session["estado"] == "esperando_cp":
         cp_clean = message.strip()
         if not re.match(r'^\d{5}$', cp_clean):
@@ -220,7 +213,6 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
             "3. No urgente (puedo esperar)"
         )
 
-    # 3. Esperando Urgencia (Paso Final)
     elif session["estado"] == "esperando_urgencia":
         urg_choice = message.strip()
         urgencia_map = {
@@ -229,7 +221,6 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
             "3": "No urgente"
         }
         
-        # Mapear respuesta
         urgencia_text = None
         if urg_choice in urgencia_map:
             urgencia_text = urgencia_map[urg_choice]
@@ -246,14 +237,11 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
             
         session["urgencia"] = urgencia_text
         
-        # Finalizar y analizar
         logger.info(f"Triaje completado para {phone_number}. Iniciando análisis...")
-        datos_ia = analizar_solicitud_con_ia(session)
+        datos_ia = await analizar_solicitud_con_ia(session)
         
-        # Notificar al profesional por Email
-        email_enviado = enviar_email_profesional(session, datos_ia, session["foto_path"])
+        email_enviado = await enviar_email_profesional(session, datos_ia, session["foto_path"])
         
-        # Notificar al profesional por WhatsApp (si está configurado)
         prof_phone = os.getenv("PROFESIONAL_WHATSAPP")
         whatsapp_enviado = False
         if prof_phone:
@@ -265,12 +253,9 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
                 f"🛠️ *Resumen:* {datos_ia.get('resumen')}\n"
                 f"📊 *Complejidad:* {datos_ia.get('complejidad')} - {datos_ia.get('justificacion_complejidad')}"
             )
-            whatsapp_enviado = whatsapp.send_whatsapp_message(prof_phone, mensaje_prof)
+            whatsapp_enviado = await whatsapp.send_whatsapp_message(prof_phone, mensaje_prof)
             
-        # Limpiar sesión y archivos temporales
         foto_path = session.get("foto_path")
-        if foto_path and os.getenv("MODULO_ESCALADO", "true").strip().lower() != "false": # Borrar en caso de que este disponible
-            pass
         if foto_path and os.path.exists(foto_path):
             try:
                 os.remove(foto_path)
@@ -281,7 +266,7 @@ def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") ->
         
         return "¡Perfecto! Tu solicitud ha sido registrada y enviada al profesional correspondiente. Se pondrán en contacto contigo lo antes posible. ¡Gracias! 👍"
 
-def limpiar_archivos_temporales_antiguos():
+async def limpiar_archivos_temporales_antiguos():
     """
     Escanea la carpeta de temporales 'storage/temp/' y borra archivos con más de 2 horas de antigüedad.
     """
@@ -295,18 +280,21 @@ def limpiar_archivos_temporales_antiguos():
     
     logger.info("Iniciando escaneo y limpieza de archivos temporales antiguos en storage/temp...")
     try:
-        count = 0
-        for filename in os.listdir(temp_dir):
-            filepath = os.path.join(temp_dir, filename)
-            if os.path.isfile(filepath):
-                if filename.startswith('.'):
-                    continue
-                mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
-                if mtime < limite:
-                    os.remove(filepath)
-                    logger.info(f"Archivo temporal antiguo eliminado: {filepath}")
-                    count += 1
-        if count > 0:
-            logger.info(f"Limpieza completada. Se eliminaron {count} archivo(s) temporal(es) antiguo(s).")
+        def _cleanup():
+            count = 0
+            for filename in os.listdir(temp_dir):
+                filepath = os.path.join(temp_dir, filename)
+                if os.path.isfile(filepath):
+                    if filename.startswith('.'):
+                        continue
+                    mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+                    if mtime < limite:
+                        os.remove(filepath)
+                        logger.info(f"Archivo temporal antiguo eliminado: {filepath}")
+                        count += 1
+            if count > 0:
+                logger.info(f"Limpieza completada. Se eliminaron {count} archivo(s) temporal(es) antiguo(s).")
+                
+        await asyncio.to_thread(_cleanup)
     except Exception as e:
         logger.error(f"Error durante la limpieza de temporales de triaje: {e}")

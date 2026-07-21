@@ -2,12 +2,8 @@ import os
 import re
 import json
 import logging
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import requests
+import asyncio
+import httpx
 from fpdf import FPDF
 from database import get_next_factura_numero, save_factura
 import whatsapp
@@ -21,7 +17,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf = FPDF()
     pdf.add_page()
     
-    # Cargar fuente DejaVuSans de forma defensiva con fallback controlado a Helvetica
     usa_dejavu = False
     try:
         pdf.add_font('DejaVu', '', 'assets/fonts/DejaVuSans.ttf')
@@ -33,7 +28,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
         pdf.set_font('Helvetica', size=10)
         simbolo_euro, simbolo_num = 'EUR', 'Num.'
         
-    # Título y número de factura
     if usa_dejavu:
         pdf.set_font('DejaVu', size=16)
     else:
@@ -42,7 +36,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf.cell(200, 10, txt=f"FACTURA {simbolo_num} {num_factura:05d}", ln=True, align="R")
     pdf.ln(10)
     
-    # Datos Emisor
     if usa_dejavu:
         pdf.set_font('DejaVu', size=12)
     else:
@@ -60,7 +53,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
         pdf.cell(100, 5, txt=f"IBAN: {emisor.get('iban', '')}", ln=True)
     pdf.ln(10)
     
-    # Datos Receptor
     if usa_dejavu:
         pdf.set_font('DejaVu', size=12)
     else:
@@ -77,7 +69,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
         pdf.cell(100, 5, txt=f"Email: {receptor.get('email', '')}", ln=True)
     pdf.ln(15)
     
-    # Línea de Concepto y Precios (Tabla simple)
     if usa_dejavu:
         pdf.set_font('DejaVu', size=10)
     else:
@@ -98,7 +89,6 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf.cell(40, 8, txt=f"{total:.2f} {simbolo_euro}", border=1, align="R")
     pdf.ln(15)
     
-    # Resumen totalizadores
     if usa_dejavu:
         pdf.set_font('DejaVu', size=10)
     else:
@@ -122,12 +112,11 @@ def generar_factura_pdf(num_factura: int, emisor: dict, receptor: dict, concepto
     pdf.cell(30, 8, txt="TOTAL:", align="R")
     pdf.cell(30, 8, txt=f"{total:.2f} {simbolo_euro}", align="R")
     
-    # Guardar PDF
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     pdf.output(filepath)
     logger.info(f"PDF de factura generado correctamente en: {filepath}")
 
-def enviar_factura_email(email_destino: str, filepath: str, num_factura: int) -> bool:
+async def enviar_factura_email(email_destino: str, filepath: str, num_factura: int) -> bool:
     import email_adapter
     asunto = f"Factura Nº {num_factura:05d}"
     cuerpo = f"Hola,\n\nTe adjuntamos la factura correspondiente Nº {num_factura:05d}.\n\nSaludos."
@@ -138,19 +127,19 @@ def enviar_factura_email(email_destino: str, filepath: str, num_factura: int) ->
         }
     ]
     try:
-        return email_adapter.enviar_email(
+        return await email_adapter.enviar_email(
             destinatario=email_destino,
             asunto=asunto,
             cuerpo_texto=cuerpo,
             adjuntos=adjuntos
         )
     except Exception as e:
-        logger.error(f"Error enviando factura por email: {e}")
+        logger.error(f"Error enviando factura por email a {email_destino}: {e}")
         return False
 
-def procesar_solicitud_factura(phone_number: str, message: str) -> str:
+async def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     """
-    Parsea la petición del usuario, genera la factura y la envía.
+    Parsea la petición del usuario, genera la factura y la envía de forma asíncrona.
     """
     datos = None
     es_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
@@ -208,16 +197,16 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         """
         
         try:
-            response = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
-            }, headers={'Content-Type': 'application/json'}, timeout=10)
-            response.raise_for_status()
-            
-            datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
+                }, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
+                
+                datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
         except Exception as e:
-            logger.error(f"Error extrayendo datos de factura con Gemini: {e}")
-            # ESCALADO A HUMANO SEGURO
+            logger.error(f"Error extrayendo datos de factura con Gemini para {phone_number}: {e}")
             import escalado_humano
             ticket_id = escalado_humano.crear_ticket_escalado(
                 phone_number=phone_number,
@@ -234,11 +223,9 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     iva_pct = datos.get("porcentaje_iva", 21)
     email_dest = datos.get("email")
 
-    # Validaciones defensivas de CIF/NIF e importe
     cif_valido = False
     if cif:
         cif = cif.strip().upper()
-        # Patrón básico alfanumérico español de 9 caracteres
         if re.match(r"^[A-Z0-9]{9}$", cif):
             cif_valido = True
             
@@ -249,8 +236,7 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         limite_maximo = 50000.0
 
     if not destinatario or not cif_valido or not concepto or base <= 0.0 or base > limite_maximo:
-        logger.warning(f"Validación defensiva fallida. Datos interpretados: {datos}")
-        # ESCALADO A HUMANO SEGURO
+        logger.warning(f"Validación defensiva fallida para {phone_number}. Datos interpretados: {datos}")
         import escalado_humano
         ticket_id = escalado_humano.crear_ticket_escalado(
             phone_number=phone_number,
@@ -260,7 +246,6 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         ticket_info = f" (Ticket #{ticket_id})" if ticket_id else ""
         return f"Disculpa, los datos interpretados para la factura no cumplen con las validaciones de seguridad de nuestro sistema. He pasado tu solicitud a un gestor humano{ticket_info} para su revisión y emisión manual. ¡Gracias! 👍"
 
-    # Datos Emisor desde .env
     emisor = {
         "nombre": os.getenv("FACTURA_EMISOR_NOMBRE", "Mi Empresa S.L."),
         "cif": os.getenv("FACTURA_EMISOR_CIF", "B12345678"),
@@ -268,51 +253,42 @@ def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         "iban": os.getenv("FACTURA_EMISOR_IBAN", "")
     }
 
-    # Calcular total e IVA
     total = base * (1 + (iva_pct / 100))
-
-    # Guardar en SQLite de forma atómica y obtener el ID incremental asignado
     num_factura = save_factura(destinatario, cif, concepto, total)
 
-    # Ruta temporal para guardar PDF
     storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
     pdf_filename = f"Factura_{num_factura:05d}.pdf"
     temp_pdf_path = os.path.join(storage_ruta, "temp", pdf_filename)
     
     try:
-        # Generar PDF localmente en la carpeta temp
-        generar_factura_pdf(num_factura, emisor, {
+        await asyncio.to_thread(generar_factura_pdf, num_factura, emisor, {
             "nombre": destinatario,
             "cif": cif,
             "email": email_dest
         }, concepto, base, iva_pct, total, temp_pdf_path)
         
-        # Leer bytes y guardar mediante storage_adapter
         with open(temp_pdf_path, "rb") as f:
             pdf_bytes = f.read()
             
         import storage_adapter
         carpeta_facturas = os.getenv("SHAREPOINT_CARPETA_FACTURAS", "facturas_emitidas").strip("/")
         logical_path = f"{carpeta_facturas}/{pdf_filename}"
-        storage_adapter.guardar_archivo(logical_path, pdf_bytes)
+        await storage_adapter.guardar_archivo(logical_path, pdf_bytes)
         
-        # Subir media a WhatsApp
-        media_id = whatsapp.upload_whatsapp_media(temp_pdf_path, "application/pdf")
+        media_id = await whatsapp.upload_whatsapp_media(temp_pdf_path, "application/pdf")
         
         if media_id:
-            # Enviar por WhatsApp
-            whatsapp.send_whatsapp_document(phone_number, media_id, pdf_filename)
+            await whatsapp.send_whatsapp_document(phone_number, media_id, pdf_filename)
             respuesta = f"¡Factura Nº {num_factura:05d} generada correctamente y enviada! 📄"
         else:
             respuesta = f"Se ha generado la factura física en el storage ({logical_path}), pero no se ha podido subir a WhatsApp."
             
-        # Enviar copia por email opcional
         if email_dest:
-            enviar_factura_email(email_dest, temp_pdf_path, num_factura)
+            await enviar_factura_email(email_dest, temp_pdf_path, num_factura)
             respuesta += f" Además se ha enviado una copia por correo a {email_dest}."
             
         return respuesta
         
     except Exception as e:
-        logger.error(f"Error durante el proceso de facturación: {e}")
+        logger.error(f"Error durante el proceso de facturación ({phone_number}): {e}")
         return "Ha ocurrido un error al generar la factura. Revisa los logs para más detalles."

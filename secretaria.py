@@ -1,8 +1,9 @@
 import os
 import database
 import logging
-import requests
+import httpx
 import json
+import asyncio
 from datetime import datetime, timedelta
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -18,9 +19,9 @@ def set_scheduler(s):
     global _scheduler
     _scheduler = s
 
-def interpretar_mensaje_interno(message: str) -> dict | None:
+async def interpretar_mensaje_interno(message: str) -> dict | None:
     """
-    Usa Gemini para determinar si un mensaje del gestor representa una acción de agenda/tareas.
+    Usa Gemini para determinar si un mensaje del gestor representa una acción de agenda/tareas de forma asíncrona.
     Si la acción es 'ninguna', devuelve None.
     """
     if os.getenv("MODULO_SECRETARIA", "true").strip().lower() == "false":
@@ -61,15 +62,16 @@ Fecha actual: "{fecha_hoy}"
     }
     
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=15)
-        response.raise_for_status()
-        res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        datos = json.loads(res_text)
-        
-        accion = datos.get("accion", "ninguna")
-        if accion == "ninguna":
-            return None
-        return datos
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            response.raise_for_status()
+            res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            datos = json.loads(res_text)
+            
+            accion = datos.get("accion", "ninguna")
+            if accion == "ninguna":
+                return None
+            return datos
     except Exception as e:
         logger.error(f"Error interpretando mensaje interno con Gemini: {e}")
         return None
@@ -149,7 +151,6 @@ def ejecutar_accion_interno(datos: dict) -> str:
         return res
         
     elif accion == "completar":
-        # Completar por coincidencia de título en tareas del día o generales
         cursor.execute("""
             UPDATE agenda_interna 
             SET completado = 1 
@@ -167,9 +168,9 @@ def ejecutar_accion_interno(datos: dict) -> str:
     conn.close()
     return "Acción no soportada."
 
-def generar_briefing_diario():
+async def generar_briefing_diario():
     """
-    Genera el briefing diario matutino y lo envía al gestor por WhatsApp, Teams y Email.
+    Genera el briefing diario matutino y lo envía al gestor por WhatsApp, Teams y Email de forma asíncrona.
     """
     if os.getenv("MODULO_SECRETARIA", "true").strip().lower() == "false":
         return
@@ -179,7 +180,6 @@ def generar_briefing_diario():
     
     hoy = datetime.now().strftime("%Y-%m-%d")
     
-    # 1. Citas de hoy
     cursor.execute("""
         SELECT titulo, hora FROM agenda_interna 
         WHERE tipo = 'cita' AND fecha = ? AND completado = 0 
@@ -188,7 +188,6 @@ def generar_briefing_diario():
     citas_rows = cursor.fetchall()
     citas = "\n".join([f"- {r[0]} ({r[1] or 'todo el día'})" for r in citas_rows]) if citas_rows else "Ninguna"
     
-    # 2. Tareas/recordatorios de hoy
     cursor.execute("""
         SELECT titulo, tipo FROM agenda_interna 
         WHERE tipo IN ('tarea', 'recordatorio') AND (fecha = ? OR fecha IS NULL) AND completado = 0
@@ -196,7 +195,6 @@ def generar_briefing_diario():
     tareas_rows = cursor.fetchall()
     tareas = "\n".join([f"- [{r[1].upper()}] {r[0]}" for r in tareas_rows]) if tareas_rows else "Ninguna"
     
-    # 3. Plazos fiscales próximos 7 días
     proximos_7 = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
     cursor.execute("""
         SELECT modelo, cliente, fecha_limite FROM plazos_fiscales 
@@ -206,19 +204,16 @@ def generar_briefing_diario():
     plazos_rows = cursor.fetchall()
     plazos = "\n".join([f"- {r[0]} ({r[1]}) - Límite: {r[2]}" for r in plazos_rows]) if plazos_rows else "Ninguno"
     
-    # 4. Tickets pendientes
     cursor.execute("SELECT id, phone_number, mensaje_cliente FROM tickets_escalados WHERE estado = 'pendiente'")
     tickets_rows = cursor.fetchall()
     tickets = "\n".join([f"- #{r[0]} de {r[1]}: \"{r[2][:40]}...\"" for r in tickets_rows]) if tickets_rows else "Ninguno"
     
-    # 5. Conversaciones recibidas ayer
     ayer = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM conversaciones WHERE date(inicio) = ?", (ayer,))
     num_conversaciones = cursor.fetchone()[0]
     
     conn.close()
     
-    # Redacción con Gemini
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         logger.error("No GEMINI_API_KEY en el briefing diario.")
@@ -243,54 +238,42 @@ Conversaciones ayer: {num_conversaciones}"""
     }
     
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30)
-        response.raise_for_status()
-        briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            response.raise_for_status()
+            briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
         logger.error(f"Error generando texto del briefing con Gemini: {e}")
         briefing = f"Buenos días. Hubo un error al generar tu briefing dinámico de hoy ({hoy}), pero tienes pendientes en tu panel administrativo."
         
-    # --- TRANSMISIÓN ---
     gestor_whatsapp = os.getenv("GESTOR_WHATSAPP")
     gestor_email = os.getenv("GESTOR_EMAIL") or os.getenv("PROFESIONAL_EMAIL")
     teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL")
     
-    # WhatsApp
     if gestor_whatsapp:
         try:
-            whatsapp.send_whatsapp_message(gestor_whatsapp, briefing)
+            await whatsapp.send_whatsapp_message(gestor_whatsapp, briefing)
             logger.info("Briefing enviado con éxito por WhatsApp.")
         except Exception as we:
             logger.error(f"Error enviando briefing por WhatsApp: {we}")
             
-    # Teams
     if teams_webhook_url:
         try:
-            myTeamsMessage = pymsteams.connectorcard(teams_webhook_url)
-            myTeamsMessage.title(f"☀️ Briefing MAIRA — {hoy}")
-            myTeamsMessage.text(briefing)
-            myTeamsMessage.send()
+            def _send_teams():
+                myTeamsMessage = pymsteams.connectorcard(teams_webhook_url)
+                myTeamsMessage.title(f"☀️ Briefing MAIRA — {hoy}")
+                myTeamsMessage.text(briefing)
+                myTeamsMessage.send()
+            await asyncio.to_thread(_send_teams)
             logger.info("Briefing enviado con éxito a Teams.")
         except Exception as te:
             logger.error(f"Error enviando briefing a Teams: {te}")
             
-    # Email
     if gestor_email:
-        email_emisor = os.getenv("EMAIL_EMISOR")
-        smtp_password = os.getenv("SMTP_PASSWORD")
-        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-        smtp_port_str = os.getenv("SMTP_PORT", "587")
-        
-        if email_emisor and smtp_password:
-            try:
-                smtp_port = int(smtp_port_str)
-            except ValueError:
-                smtp_port = 587
-                
+        try:
+            import email_adapter
             asunto = f"☀️ Briefing MAIRA — {hoy}"
             briefing_html = briefing.replace("\n", "<br>")
-            
-            # Tabla de citas para el correo
             citas_tabla_html = "<table border='1' cellpadding='5' style='border-collapse: collapse; width:100%;'>"
             citas_tabla_html += "<tr style='background-color:#f2f2f2;'><th>Cita / Reunión</th><th>Hora</th></tr>"
             if citas_rows:
@@ -312,25 +295,14 @@ Conversaciones ayer: {num_conversaciones}"""
                 </body>
             </html>
             """
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = asunto
-            msg["From"] = email_emisor
-            msg["To"] = gestor_email
-            msg.attach(MIMEText(cuerpo, "html"))
-            
-            try:
-                server = smtplib.SMTP(smtp_server, smtp_port)
-                server.starttls()
-                server.login(email_emisor, smtp_password)
-                server.sendmail(email_emisor, gestor_email, msg.as_string())
-                server.quit()
-                logger.info("Briefing enviado con éxito por Email.")
-            except Exception as ee:
-                logger.error(f"Error enviando briefing por Email: {ee}")
+            await email_adapter.enviar_email(gestor_email, asunto, cuerpo_html=cuerpo)
+            logger.info("Briefing enviado con éxito por Email.")
+        except Exception as ee:
+            logger.error(f"Error enviando briefing por Email: {ee}")
 
-def parsear_y_guardar_plazos_txt(knowledge_text: str):
+async def parsear_y_guardar_plazos_txt(knowledge_text: str):
     """
-    Busca la sección [PLAZOS FISCALES PRÓXIMOS] en el texto y parsea los modelos y fechas usando Gemini.
+    Busca la sección [PLAZOS FISCALES PRÓXIMOS] en el texto y parsea los modelos y fechas usando Gemini de forma asíncrona.
     """
     if "[PLAZOS FISCALES PRÓXIMOS]" not in knowledge_text:
         return
@@ -358,34 +330,35 @@ TEXTO:
     }
     
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=15)
-        response.raise_for_status()
-        res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        plazos = json.loads(res_text)
-        
-        conn = database.get_connection()
-        cursor = conn.cursor()
-        
-        for p in plazos:
-            modelo = p.get("modelo")
-            desc = p.get("descripcion", "")
-            cliente = p.get("cliente", "TODOS")
-            fecha_limite = p.get("fecha_limite")
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            response.raise_for_status()
+            res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            plazos = json.loads(res_text)
             
-            if not modelo or not fecha_limite:
-                continue
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            
+            for p in plazos:
+                modelo = p.get("modelo")
+                desc = p.get("descripcion", "")
+                cliente = p.get("cliente", "TODOS")
+                fecha_limite = p.get("fecha_limite")
                 
-            cursor.execute("""
-                SELECT id FROM plazos_fiscales WHERE modelo = ? AND fecha_limite = ?
-            """, (modelo, fecha_limite))
-            if not cursor.fetchone():
+                if not modelo or not fecha_limite:
+                    continue
+                    
                 cursor.execute("""
-                    INSERT INTO plazos_fiscales (modelo, descripcion, cliente, fecha_limite)
-                    VALUES (?, ?, ?, ?)
-                """, (modelo, desc, cliente, fecha_limite))
-                logger.info(f"Plazo fiscal importado: {modelo} para {fecha_limite}")
-                
-        conn.commit()
-        conn.close()
+                    SELECT id FROM plazos_fiscales WHERE modelo = ? AND fecha_limite = ?
+                """, (modelo, fecha_limite))
+                if not cursor.fetchone():
+                    cursor.execute("""
+                        INSERT INTO plazos_fiscales (modelo, descripcion, cliente, fecha_limite)
+                        VALUES (?, ?, ?, ?)
+                    """, (modelo, desc, cliente, fecha_limite))
+                    logger.info(f"Plazo fiscal importado: {modelo} para {fecha_limite}")
+                    
+            conn.commit()
+            conn.close()
     except Exception as e:
         logger.error(f"Error parseando plazos fiscales del knowledge: {e}")

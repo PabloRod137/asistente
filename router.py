@@ -1,13 +1,13 @@
 import os
-import requests
+import httpx
 import logging
 
 logger = logging.getLogger(__name__)
 
-def detectar_intencion(message: str) -> str:
+async def detectar_intencion(message: str) -> str:
     """
     Clasifica el mensaje entrante del usuario en una de las intenciones soportadas:
-    AGENDA, TICKET, FACTURA, TRIAJE, COBRADOR, CHAT.
+    AGENDA, TICKET, FACTURA, TRIAJE, COBRADOR, CHAT de forma asíncrona.
     """
     # Reglas duras (heurísticas rápidas) para optimización y robustez ante fallos de la API
     if message:
@@ -63,43 +63,41 @@ def detectar_intencion(message: str) -> str:
     }
 
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Extraer texto ignorando bloques de 'thinking' que no tienen 'text'
-        parts = data["candidates"][0]["content"].get("parts", [])
-        text_parts = [p["text"] for p in parts if "text" in p]
-        if not text_parts:
-            logger.warning("Gemini no devolvió texto en ninguna part. Usando CHAT.")
-            return "CHAT"
-        intent = text_parts[-1].strip().upper()
-        
-        # Sanitizar respuesta por si Gemini devuelve texto extra
-        valid_intents = {"AGENDA", "TICKET", "FACTURA", "TRIAJE", "CHAT"}
-        matched_intent = "CHAT"
-        for i in valid_intents:
-            if i in intent:
-                matched_intent = i
-                break
-                
-        # Verificar si el módulo correspondiente está activo en el .env
-        env_mapping = {
-            "AGENDA": "MODULO_AGENDA",
-            "TICKET": "MODULO_TICKETS",
-            "FACTURA": "MODULO_FACTURAS",
-            "TRIAJE": "MODULO_TRIAJE"
-        }
-        
-        if matched_intent in env_mapping:
-            env_var = env_mapping[matched_intent]
-            if os.getenv(env_var, "true").strip().lower() == "false":
-                logger.info(f"Intención {matched_intent} detectada pero el módulo está inactivo. Desviando a CHAT.")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            response.raise_for_status()
+            data = response.json()
+            
+            parts = data["candidates"][0]["content"].get("parts", [])
+            text_parts = [p["text"] for p in parts if "text" in p]
+            if not text_parts:
+                logger.warning("Gemini no devolvió texto en ninguna part. Usando CHAT.")
                 return "CHAT"
-                
-        logger.info(f"Intención detectada: {matched_intent}")
-        return matched_intent
-        
+            intent = text_parts[-1].strip().upper()
+            
+            valid_intents = {"AGENDA", "TICKET", "FACTURA", "TRIAJE", "CHAT"}
+            matched_intent = "CHAT"
+            for i in valid_intents:
+                if i in intent:
+                    matched_intent = i
+                    break
+                    
+            env_mapping = {
+                "AGENDA": "MODULO_AGENDA",
+                "TICKET": "MODULO_TICKETS",
+                "FACTURA": "MODULO_FACTURAS",
+                "TRIAJE": "MODULO_TRIAJE"
+            }
+            
+            if matched_intent in env_mapping:
+                env_var = env_mapping[matched_intent]
+                if os.getenv(env_var, "true").strip().lower() == "false":
+                    logger.info(f"Intención {matched_intent} detectada pero el módulo está inactivo. Desviando a CHAT.")
+                    return "CHAT"
+                    
+            logger.info(f"Intención detectada: {matched_intent}")
+            return matched_intent
+            
     except Exception as e:
         logger.error(f"Error clasificando intención con Gemini: {e}")
         return "CHAT"

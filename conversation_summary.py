@@ -1,13 +1,12 @@
 import os
 import database
-import requests
+import httpx
 import logging
-import smtplib
+import asyncio
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import pymsteams
-from apscheduler.schedulers.background import BackgroundScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -18,97 +17,71 @@ def set_scheduler(s):
     _scheduler = s
 
 def detectar_despedida(message: str) -> bool:
-    """
-    Devuelve True si el mensaje contiene alguna palabra de despedida.
-    """
     if not message:
         return False
-    msg_lower = message.lower().strip()
-    despedidas = [
-        "gracias", "hasta luego", "adiós", "adios", 
-        "hasta pronto", "ok gracias", "perfecto gracias", 
-        "nada más", "eso es todo"
+    msg = message.lower().strip()
+    palabras_despedida = [
+        "gracias", "muchas gracias", "adiós", "adios", "hasta luego", 
+        "hasta mañana", "chao", "perfecto gracias", "nada más", "nada mas"
     ]
-    for d in despedidas:
-        if d in msg_lower:
-            return True
-    return False
+    return any(p in msg for p in palabras_despedida)
 
 def registrar_actividad(phone_number: str):
-    """
-    Registra la actividad en la base de datos (inicia nueva conversación si
-    la anterior fue resumida/enviada) y reprograma el timeout de inactividad.
-    """
-    if _scheduler is None:
-        logger.warning("Scheduler no configurado en conversation_summary. Omitiendo timeout.")
-        return
-
-    if os.getenv("MODULO_RESUMEN", "true").strip().lower() == "false":
-        return
-
     conn = database.get_connection()
     cursor = conn.cursor()
     
-    # Comprobar si hay una conversación activa
     cursor.execute('''
-        SELECT resumen_enviado FROM conversaciones WHERE phone_number = ?
+        SELECT resumen_enviado, inicio FROM conversaciones WHERE phone_number = ?
     ''', (phone_number,))
     row = cursor.fetchone()
     
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    if row is None or row[0] == 1:
-        # Si no existe conversación o ya se envió el resumen, iniciamos una nueva
+    if not row or row[0] == 1:
         cursor.execute('''
-            INSERT OR REPLACE INTO conversaciones (phone_number, inicio, ultimo_mensaje, resumen_enviado)
+            INSERT INTO conversaciones (phone_number, inicio, ultima_actividad, resumen_enviado)
             VALUES (?, ?, ?, 0)
+            ON CONFLICT(phone_number) DO UPDATE SET
+                inicio = excluded.inicio,
+                ultima_actividad = excluded.ultima_actividad,
+                resumen_enviado = 0,
+                resumen_texto = NULL
         ''', (phone_number, now_str, now_str))
-        logger.info(f"Nueva conversación iniciada en DB para {phone_number}")
+        logger.info(f"Iniciada nueva conversación activa para {phone_number}")
     else:
-        # Si está activa (resumen_enviado = 0), actualizamos el último mensaje
         cursor.execute('''
-            UPDATE conversaciones
-            SET ultimo_mensaje = ?
-            WHERE phone_number = ?
+            UPDATE conversaciones SET ultima_actividad = ? WHERE phone_number = ?
         ''', (now_str, phone_number))
         
     conn.commit()
     conn.close()
     
-    # Programar/Reprogramar el job de inactividad
-    timeout_mins = int(os.getenv("CONVERSACION_TIMEOUT_MINUTOS", "30"))
-    job_id = f"summary_timeout_{phone_number}"
-    
-    # Cancelar el job anterior si existe
-    if _scheduler.get_job(job_id):
+    if _scheduler:
+        job_id = f"summary_timeout_{phone_number}"
+        timeout_minutes = int(os.getenv("TIMEOUT_INACTIVIDAD_MINUTOS", "15"))
+        run_time = datetime.now() + timedelta(minutes=timeout_minutes)
+        
         try:
-            _scheduler.remove_job(job_id)
+            _scheduler.add_job(
+                generar_y_enviar_resumen,
+                'date',
+                run_date=run_time,
+                args=[phone_number],
+                id=job_id,
+                replace_existing=True
+            )
+            logger.info(f"Programado timeout de conversación para {phone_number} en {timeout_minutes} min ({run_time})")
         except Exception as e:
-            logger.debug(f"Error al remover job {job_id}: {e}")
-            
-    # Configurar el nuevo job de inactividad
-    run_time = datetime.now() + timedelta(minutes=timeout_mins)
-    _scheduler.add_job(
-        func=generar_y_enviar_resumen,
-        trigger='date',
-        run_date=run_time,
-        args=[phone_number],
-        id=job_id
-    )
-    logger.info(f"Programado timeout de inactividad para {phone_number} en {timeout_mins} minutos.")
+            logger.error(f"Error programando job de timeout en scheduler: {e}")
 
-def generar_resumen(phone_number: str) -> str:
-    """
-    Obtiene el historial completo de la conversación activa y genera un resumen usando Gemini 2.0 Flash.
-    """
+async def generar_resumen(phone_number: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return "No API key configured for Gemini."
-        
+        return "No se pudo generar el resumen porque falta GEMINI_API_KEY."
+
     conn = database.get_connection()
     cursor = conn.cursor()
     
-    # Obtener el inicio de la conversación activa
     cursor.execute('''
         SELECT inicio FROM conversaciones WHERE phone_number = ?
     ''', (phone_number,))
@@ -119,7 +92,6 @@ def generar_resumen(phone_number: str) -> str:
         
     inicio_timestamp = row[0]
     
-    # Obtener todos los mensajes desde que inició la conversación
     cursor.execute('''
         SELECT role, content, timestamp FROM messages
         WHERE phone_number = ? AND timestamp >= ?
@@ -158,32 +130,22 @@ CONVERSACIÓN:
     }
     
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            response.raise_for_status()
+            data = response.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
         logger.error(f"Error llamando a Gemini para resumen: {e}")
         return f"No se pudo generar el resumen automáticamente debido a un error: {e}"
 
-def enviar_email(phone_number: str, resumen: str, historial_text: str):
-    """
-    Envía el resumen generado por correo electrónico al gestor configurado.
-    """
-    email_emisor = os.getenv("EMAIL_EMISOR")
-    smtp_password = os.getenv("SMTP_PASSWORD")
+async def enviar_email(phone_number: str, resumen: str, historial_text: str):
+    import email_adapter
     gestor_email = os.getenv("GESTOR_EMAIL") or os.getenv("PROFESIONAL_EMAIL")
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port_str = os.getenv("SMTP_PORT", "587")
     
-    if not email_emisor or not smtp_password or not gestor_email:
+    if not gestor_email:
         logger.warning("Configuración de correo electrónico incompleta en .env. Omitiendo envío de email.")
         return
-        
-    try:
-        smtp_port = int(smtp_port_str)
-    except ValueError:
-        smtp_port = 587
         
     fecha_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     asunto = f"[Lex Guardian] Resumen conversación — {phone_number} — {fecha_hora}"
@@ -209,26 +171,13 @@ def enviar_email(phone_number: str, resumen: str, historial_text: str):
     </html>
     """
     
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = asunto
-    msg["From"] = email_emisor
-    msg["To"] = gestor_email
-    msg.attach(MIMEText(cuerpo, "html"))
-    
     try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-        server.login(email_emisor, smtp_password)
-        server.sendmail(email_emisor, gestor_email, msg.as_string())
-        server.quit()
+        await email_adapter.enviar_email(gestor_email, asunto, cuerpo_html=cuerpo)
         logger.info(f"Email de resumen enviado correctamente a {gestor_email}")
     except Exception as e:
         logger.error(f"Error enviando email de resumen: {e}")
 
-def enviar_teams(phone_number: str, resumen: str):
-    """
-    Envía el resumen del cliente al webhook del canal de Microsoft Teams.
-    """
+async def enviar_teams(phone_number: str, resumen: str):
     teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL")
     if not teams_webhook_url or not teams_webhook_url.strip():
         logger.info("TEAMS_WEBHOOK_URL no configurado. Omitiendo envío a Teams.")
@@ -237,22 +186,18 @@ def enviar_teams(phone_number: str, resumen: str):
     fecha_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     try:
-        myTeamsMessage = pymsteams.connectorcard(teams_webhook_url)
-        myTeamsMessage.title(f"Resumen de Conversación — {phone_number}")
-        
-        texto_mensaje = f"**Cliente:** {phone_number}\n**Fecha/Hora:** {fecha_hora}\n\n{resumen}"
-        myTeamsMessage.text(texto_mensaje)
-        
-        myTeamsMessage.send()
+        def _send():
+            myTeamsMessage = pymsteams.connectorcard(teams_webhook_url)
+            myTeamsMessage.title(f"Resumen de Conversación — {phone_number}")
+            texto_mensaje = f"**Cliente:** {phone_number}\n**Fecha/Hora:** {fecha_hora}\n\n{resumen}"
+            myTeamsMessage.text(texto_mensaje)
+            myTeamsMessage.send()
+        await asyncio.to_thread(_send)
         logger.info("Resumen de conversación enviado correctamente a Microsoft Teams.")
     except Exception as e:
         logger.error(f"Error enviando notificación a Teams: {e}")
 
-def generar_y_enviar_resumen(phone_number: str):
-    """
-    Función que orquesta la generación del resumen y envío a los canales correspondientes
-    siempre y cuando no se haya enviado ya el resumen de la conversación activa.
-    """
+async def generar_y_enviar_resumen(phone_number: str):
     if _scheduler is None:
         logger.warning("Scheduler no configurado en conversation_summary. Omitiendo timeout.")
         return
@@ -273,7 +218,6 @@ def generar_y_enviar_resumen(phone_number: str):
         logger.info(f"El resumen para {phone_number} ya fue enviado o la conversación no existe.")
         return
         
-    # Marcar como enviado inmediatamente para evitar reentradas
     cursor.execute('''
         UPDATE conversaciones SET resumen_enviado = 1 WHERE phone_number = ?
     ''', (phone_number,))
@@ -281,7 +225,6 @@ def generar_y_enviar_resumen(phone_number: str):
     
     inicio_timestamp = row[1]
     
-    # Obtener historial para el correo antes de cerrar
     cursor.execute('''
         SELECT role, content, timestamp FROM messages
         WHERE phone_number = ? AND timestamp >= ?
@@ -290,7 +233,6 @@ def generar_y_enviar_resumen(phone_number: str):
     messages = cursor.fetchall()
     conn.close()
     
-    # Cancelar el job de timeout si aún estaba pendiente en el programador
     job_id = f"summary_timeout_{phone_number}"
     if _scheduler.get_job(job_id):
         try:
@@ -300,9 +242,8 @@ def generar_y_enviar_resumen(phone_number: str):
             logger.debug(f"Error cancelando job {job_id}: {e}")
             
     logger.info(f"Generando resumen de conversación para {phone_number}...")
-    resumen = generar_resumen(phone_number)
+    resumen = await generar_resumen(phone_number)
     
-    # Guardar el resumen generado en la columna resumen_texto de conversaciones
     try:
         conn = database.get_connection()
         cursor = conn.cursor()
@@ -314,11 +255,9 @@ def generar_y_enviar_resumen(phone_number: str):
     except Exception as dbe:
         logger.error(f"Error guardando resumen_texto en DB: {dbe}")
 
-    # Extraer y guardar datos de memoria del cliente si está habilitado
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() != "false":
         try:
             import client_memory
-            # Convertir la lista de mensajes en formato de historial con 'role' y 'content'
             history_list = [{"role": r, "content": c} for r, c, t in messages]
             datos_extraidos = client_memory.extraer_datos_cliente(phone_number, history_list)
             client_memory.upsert_cliente(phone_number, datos_extraidos)
@@ -331,6 +270,5 @@ def generar_y_enviar_resumen(phone_number: str):
         sender = "Maira" if r == "assistant" else "Cliente"
         historial_text += f"[{t}] {sender}: {c}\n"
         
-    # Enviar notificaciones
-    enviar_email(phone_number, resumen, historial_text)
-    enviar_teams(phone_number, resumen)
+    await enviar_email(phone_number, resumen, historial_text)
+    await enviar_teams(phone_number, resumen)

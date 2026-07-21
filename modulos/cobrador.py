@@ -3,9 +3,9 @@ import whatsapp
 
 logger = logging.getLogger(__name__)
 
-def lanzar_aviso_whatsapp(phone: str, mensaje: str) -> bool:
+async def lanzar_aviso_whatsapp(phone: str, mensaje: str) -> bool:
     """
-    Envía un recordatorio de pago a un cliente a través de WhatsApp.
+    Envía un recordatorio de pago a un cliente a través de WhatsApp de forma asíncrona.
     Esta función es invocada por el orquestador externo o scripts programados.
     """
     logger.info(f"Enviando aviso de cobro a {phone}")
@@ -13,8 +13,7 @@ def lanzar_aviso_whatsapp(phone: str, mensaje: str) -> bool:
         logger.error("Teléfono o mensaje inválido para lanzar_aviso_whatsapp")
         return False
         
-    # Enviar mensaje por whatsapp
-    ret = whatsapp.send_whatsapp_message(phone, mensaje)
+    ret = await whatsapp.send_whatsapp_message(phone, mensaje)
     if ret:
         logger.info(f"Aviso de cobro enviado con éxito a {phone}")
     else:

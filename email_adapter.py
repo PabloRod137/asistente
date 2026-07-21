@@ -1,8 +1,9 @@
 import os
 import base64
 import smtplib
+import asyncio
 import logging
-import requests
+import httpx
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -12,7 +13,7 @@ import graph_auth
 
 logger = logging.getLogger("asistente.email_adapter")
 
-def enviar_email_smtp(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
+def _enviar_email_smtp_sync(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
     email_emisor = os.getenv("EMAIL_EMISOR")
     smtp_password = os.getenv("SMTP_PASSWORD")
     smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -67,12 +68,15 @@ def enviar_email_smtp(destinatario: str, asunto: str, cuerpo_texto: str = None, 
     logger.info(f"Email SMTP enviado con éxito a {destinatario}")
     return True
 
-def enviar_email_graph(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
+async def enviar_email_smtp(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
+    return await asyncio.to_thread(_enviar_email_smtp_sync, destinatario, asunto, cuerpo_texto, cuerpo_html, adjuntos)
+
+async def enviar_email_graph(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
     email_emisor = os.getenv("EMAIL_EMISOR")
     if not email_emisor:
         raise ValueError("Falta configurar EMAIL_EMISOR para Graph Mail.")
         
-    token = graph_auth.get_access_token()
+    token = await graph_auth.get_access_token()
     url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/sendMail"
     
     headers = {
@@ -98,7 +102,6 @@ def enviar_email_graph(destinatario: str, asunto: str, cuerpo_texto: str = None,
                 content_bytes = f.read()
             encoded_content = base64.b64encode(content_bytes).decode("utf-8")
             
-            # Simple content type detection
             content_type = "application/octet-stream"
             if filename.lower().endswith(".pdf"):
                 content_type = "application/pdf"
@@ -139,20 +142,21 @@ def enviar_email_graph(destinatario: str, asunto: str, cuerpo_texto: str = None,
     }
     
     logger.info(f"Enviando correo vía Graph API desde {email_emisor} a {destinatario}...")
-    res = requests.post(url, headers=headers, json=payload, timeout=30)
-    res.raise_for_status()
-    logger.info(f"Email Graph enviado con éxito a {destinatario}")
-    return True
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        res = await client.post(url, headers=headers, json=payload)
+        res.raise_for_status()
+        logger.info(f"Email Graph enviado con éxito a {destinatario}")
+        return True
 
-def enviar_email(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
+async def enviar_email(destinatario: str, asunto: str, cuerpo_texto: str = None, cuerpo_html: str = None, adjuntos: list = None) -> bool:
     tipo = os.getenv("EMAIL_TIPO", "smtp").strip().lower()
     if tipo == "graph":
         try:
-            return enviar_email_graph(destinatario, asunto, cuerpo_texto, cuerpo_html, adjuntos)
+            return await enviar_email_graph(destinatario, asunto, cuerpo_texto, cuerpo_html, adjuntos)
         except Exception as e:
             logger.warning(
                 f"FALLBACK CORREO: Error enviando email a '{destinatario}' vía Graph: {e}. "
                 f"Cayendo automáticamente a SMTP.", 
                 exc_info=True
             )
-    return enviar_email_smtp(destinatario, asunto, cuerpo_texto, cuerpo_html, adjuntos)
+    return await enviar_email_smtp(destinatario, asunto, cuerpo_texto, cuerpo_html, adjuntos)

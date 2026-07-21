@@ -3,6 +3,7 @@ import re
 import json
 import shutil
 import logging
+import asyncio
 from datetime import datetime
 import openpyxl
 from openpyxl import Workbook
@@ -24,14 +25,13 @@ def sanitizar_nombre_archivo(texto):
     s = re.sub(r'[^a-zA-Z0-9_\-]', '', s)
     return s if s else "desconocido"
 
-def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos: dict) -> int:
+async def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos: dict) -> int:
     """
-    Guarda la imagen de ticket en SharePoint/Local y registra los datos en SQLite.
+    Guarda la imagen de ticket en SharePoint/Local y registra los datos en SQLite de forma asíncrona.
     """
     cif_cliente = os.getenv("FACTURA_EMISOR_CIF", "general").strip().upper()
     cif_sanitizado = sanitizar_nombre_archivo(cif_cliente)
     
-    # 1. Determinar subcarpeta YYYY-MM
     fecha_str = datos.get("fecha")
     if fecha_str and re.match(r'^\d{4}-\d{2}-\d{2}$', fecha_str):
         yyyy_mm = fecha_str[:7]
@@ -46,19 +46,15 @@ def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos: dict)
     total_str = f"{total:.2f}".replace(".", "-")
     nombre_imagen = f"{fecha_archivo}_{emisor_san}_{total_str}.jpg"
     
-    # Ruta lógica del ticket en storage
     carpeta_tickets = os.getenv("SHAREPOINT_CARPETA_TICKETS", "gastos_clientes").strip("/")
     logical_image_path = f"{carpeta_tickets}/{cif_sanitizado}/{yyyy_mm}/{nombre_imagen}"
     
-    # Leer bytes del archivo de imagen temporal
     with open(temp_image_path, "rb") as f:
         img_bytes = f.read()
         
-    # Guardar en storage_adapter
-    storage_adapter.guardar_archivo(logical_image_path, img_bytes)
+    await storage_adapter.guardar_archivo(logical_image_path, img_bytes)
     logger.info(f"Imagen del ticket guardada en storage ({logical_image_path})")
     
-    # 2. Registrar en base de datos SQLite
     emisor = datos.get("emisor") or "Desconocido"
     cif_emisor = datos.get("cif_emisor") or ""
     base = datos.get("base_imponible", 0.0)
@@ -79,10 +75,10 @@ def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos: dict)
     logger.info(f"Gasto registrado en la base de datos con ID {gasto_id}")
     return gasto_id
 
-def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
+async def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
     """
     Cuando se recibe una imagen por WhatsApp, se procesa con Gemini Vision para OCR,
-    y se le pide confirmación al usuario de los datos fiscales extraídos.
+    y se le pide confirmación al usuario de los datos fiscales extraídos de forma asíncrona.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -94,42 +90,38 @@ def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
     logger.info(f"Procesando ticket en {temp_image_path} para {phone_number}")
     
     try:
-        # Usar SDK google-genai para procesar con Gemini Vision
-        client = genai.Client(api_key=api_key)
-        
-        with open(temp_image_path, 'rb') as f:
-            file_bytes = f.read()
-            
-        part = types.Part.from_bytes(data=file_bytes, mime_type='image/jpeg')
-        
-        prompt = """
-        Analiza esta imagen de ticket de gasto o factura simplificada y extrae la información fiscal de forma precisa.
-        Debes extraer los siguientes campos obligatoriamente:
-        1. emisor: Nombre del establecimiento o empresa emisora (string).
-        2. cif_emisor: CIF o NIF del emisor si aparece, o null (string).
-        3. fecha: Fecha del ticket en formato YYYY-MM-DD, o null (string).
-        4. base_imponible: Importe base sin IVA (float).
-        5. porcentaje_iva: Porcentaje de IVA aplicado, por ejemplo 4, 10 o 21 (integer).
-        6. cuota_iva: Importe del IVA (float).
-        7. total: Importe total del ticket (float).
+        def _call_gemini_vision():
+            client = genai.Client(api_key=api_key)
+            with open(temp_image_path, 'rb') as f:
+                file_bytes = f.read()
+            part = types.Part.from_bytes(data=file_bytes, mime_type='image/jpeg')
+            prompt = """
+            Analiza esta imagen de ticket de gasto o factura simplificada y extrae la información fiscal de forma precisa.
+            Debes extraer los siguientes campos obligatoriamente:
+            1. emisor: Nombre del establecimiento o empresa emisora (string).
+            2. cif_emisor: CIF o NIF del emisor si aparece, o null (string).
+            3. fecha: Fecha del ticket en formato YYYY-MM-DD, o null (string).
+            4. base_imponible: Importe base sin IVA (float).
+            5. porcentaje_iva: Porcentaje de IVA aplicado, por ejemplo 4, 10 o 21 (integer).
+            6. cuota_iva: Importe del IVA (float).
+            7. total: Importe total del ticket (float).
 
-        Reglas críticas:
-        - Devuelve ÚNICAMENTE un JSON válido con las claves mencionadas.
-        - No inventes ningún valor. Si no aparece o no estás seguro, asigna null.
-        - Asegúrate de que los importes sean numéricos.
-        """
-        
-        respuesta = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[part, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+            Reglas críticas:
+            - Devuelve ÚNICAMENTE un JSON válido con las claves mencionadas.
+            - No inventes ningún valor. Si no aparece o no estás seguro, asigna null.
+            - Asegúrate de que los importes sean numéricos.
+            """
+            return client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[part, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
             )
-        )
-        
+            
+        respuesta = await asyncio.to_thread(_call_gemini_vision)
         datos = json.loads(respuesta.text.strip())
         
-        # Formatear e interpretar tipos
         emisor = str(datos.get("emisor", "Desconocido")).strip()
         cif_emisor = str(datos.get("cif_emisor", "")).strip().upper() if datos.get("cif_emisor") else None
         fecha = str(datos.get("fecha", "")).strip() if datos.get("fecha") else None
@@ -147,7 +139,6 @@ def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
         cuota = safe_float(datos.get("cuota_iva"))
         total = safe_float(datos.get("total"))
         
-        # Validar cuadre (tolerancia 0.02€)
         advertencia = None
         if abs(total - (base + cuota)) > 0.02:
             advertencia = "Total no cuadra (Base + Cuota IVA != Total), revisar manualmente"
@@ -165,13 +156,11 @@ def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
         if advertencia:
             datos_procesados["advertencia"] = advertencia
 
-        # Guardar en sesión
         _tickets_pendientes[phone_number] = {
             "temp_path": temp_image_path,
             "datos": datos_procesados
         }
         
-        # Devolver mensaje interactivo numerado en texto plano
         msg = (
             "🔍 *Datos extraídos de tu ticket:*\n\n"
             f"🏢 *Emisor:* {emisor}\n"
@@ -193,15 +182,14 @@ def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
         return msg
         
     except Exception as e:
-        logger.error(f"Error procesando ticket: {e}")
-        # Limpiar
+        logger.error(f"Error procesando ticket ({phone_number}): {e}")
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
         return "Lo siento, ha ocurrido un error al analizar la imagen del ticket con la IA. Por favor, vuelve a enviarla."
 
-def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
+async def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
     """
-    Comprueba si el usuario tiene un ticket pendiente y responde a las opciones.
+    Comprueba si el usuario tiene un ticket pendiente y responde a las opciones de forma asíncrona.
     """
     ticket_session = _tickets_pendientes.get(phone_number)
     if not ticket_session:
@@ -210,12 +198,11 @@ def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
     msg_clean = message.strip()
     
     if msg_clean == "1" or "si" in msg_clean.lower() or "sí" in msg_clean.lower() or "correcto" in msg_clean.lower():
-        # Confirmar y guardar
         temp_path = ticket_session["temp_path"]
         datos = ticket_session["datos"]
         
         try:
-            guardar_registro_gasto(phone_number, temp_path, datos)
+            await guardar_registro_gasto(phone_number, temp_path, datos)
             respuesta = "¡Ticket guardado y registrado con éxito! ✅"
         except Exception as e:
             logger.error(f"Error guardando ticket en la base de datos: {e}")
@@ -228,12 +215,10 @@ def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
         return respuesta
         
     elif msg_clean == "2" or "no" in msg_clean.lower() or "descartar" in msg_clean.lower():
-        # Descartar
         temp_path = ticket_session["temp_path"]
         if os.path.exists(temp_path):
             os.remove(temp_path)
         del _tickets_pendientes[phone_number]
         return "Ticket descartado. ❌ Si quieres puedes enviarme otra foto."
         
-    # Si no es ninguna opción, recordar qué hacer
     return "Tengo un ticket pendiente de confirmación. Por favor responde:\n1. Si es correcto\n2. Si deseas descartarlo"

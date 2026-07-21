@@ -50,9 +50,9 @@ def iniciar_alta(phone_number: str, intencion_original: str, mensaje_original: s
         "Por favor, indícame tu *nombre y apellidos completos*:"
     )
 
-def gestionar_alta(phone_number: str, content: str) -> str:
+async def gestionar_alta(phone_number: str, content: str) -> str:
     """
-    Procesa las respuestas del cliente dentro de la máquina de estados de alta.
+    Procesa las respuestas del cliente dentro de la máquina de estados de alta de forma asíncrona.
     """
     limpiar_sesiones_expiradas()
     if phone_number not in _alta_sesiones:
@@ -123,21 +123,19 @@ def gestionar_alta(phone_number: str, content: str) -> str:
         conn.close()
         logger.info(f"Completado registro de alta para {phone_number} ({nombre})")
 
-        # Limpiar sesión
         _alta_sesiones.pop(phone_number, None)
 
-        # Reanudar acción original
         res_bienvenida = f"✅ *Registro completado.* ¡Gracias {nombre}!\n\n"
         
         if intencion == "AGENDA":
             from modulos import agenda
             history = database.get_history(phone_number, limit=5)
-            res_agenda = agenda.procesar_agenda(phone_number, mensaje_orig, history)
+            res_agenda = await agenda.procesar_agenda(phone_number, mensaje_orig, history)
             return res_bienvenida + (res_agenda or "")
             
         elif intencion == "FACTURA":
             from modulos import facturas
-            res_factura = facturas.procesar_solicitud_factura(phone_number, mensaje_orig)
+            res_factura = await facturas.procesar_solicitud_factura(phone_number, mensaje_orig)
             return res_bienvenida + res_factura
             
         elif intencion == "TICKET":
@@ -145,7 +143,7 @@ def gestionar_alta(phone_number: str, content: str) -> str:
             
         elif intencion == "TRIAJE":
             from modulos import triaje
-            res_triaje = triaje.gestionar_triaje(phone_number, mensaje_orig, "text")
+            res_triaje = await triaje.gestionar_triaje(phone_number, mensaje_orig, "text")
             return res_bienvenida + res_triaje
             
         else:

@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("asistente.main")
 
-# Cargar variables de entorno
 load_dotenv()
 
 import database
@@ -26,11 +26,11 @@ import gestor_mode
 import client_memory
 import escalado_humano
 import secretaria
+
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
 secretaria.set_scheduler(scheduler)
 
-# Configurar FastAPI
 APP_NAME = os.getenv("APP_NAME", "SuperAsistente Comercial")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "pimia_secret_asistente_2026")
 
@@ -44,8 +44,7 @@ app.add_middleware(
 )
 
 @app.on_event("startup")
-def on_startup():
-    # Comprobación de seguridad para MODO_TEST y entorno de producción
+async def on_startup():
     modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
     entorno = os.getenv("ENTORNO", os.getenv("ENV", "desarrollo")).strip().lower()
     
@@ -70,7 +69,6 @@ def on_startup():
     logger.info("Iniciando la base de datos de Asistente...")
     database.init_db()
     
-    # Programar briefing diario recurrente si está habilitado
     if os.getenv("MODULO_SECRETARIA", "true").strip().lower() != "false":
         from apscheduler.triggers.cron import CronTrigger
         hora_briefing = os.getenv("BRIEFING_HORA", "09:00").split(":")
@@ -85,7 +83,6 @@ def on_startup():
         except Exception as e:
             logger.error(f"Error programando briefing diario: {e}")
 
-    # Programar recordatorios automáticos diarios (documentos y plazos fiscales)
     try:
         from apscheduler.triggers.cron import CronTrigger
         from modulos import recordatorios
@@ -103,7 +100,6 @@ def on_startup():
     except Exception as e:
         logger.error(f"Error programando job diario de recordatorios automáticos: {e}")
 
-    # Programar limpieza periódica de archivos temporales de triaje (cada 12 horas)
     try:
         scheduler.add_job(
             triaje.limpiar_archivos_temporales_antiguos,
@@ -113,8 +109,7 @@ def on_startup():
             replace_existing=True
         )
         logger.info("Programada limpieza periódica de archivos temporales de triaje (cada 12 horas).")
-        # Ejecutar una primera limpieza al arrancar para liberar espacio
-        triaje.limpiar_archivos_temporales_antiguos()
+        await triaje.limpiar_archivos_temporales_antiguos()
     except Exception as e:
         logger.error(f"Error programando limpieza periódica de temporales: {e}")
 
@@ -134,59 +129,46 @@ def verify_webhook(request: Request):
     
     return Response(content="Error de validación", status_code=403)
 
-def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str) -> str:
+async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str) -> str:
     """
-    Orquesta la respuesta del bot decidiendo a qué módulo derivar el mensaje
-    según las sesiones activas o el router de intenciones.
+    Orquesta la respuesta del bot decidiendo a qué módulo derivar el mensaje de forma asíncrona.
     """
-    # 1. Obtener historial para contexto
     history = database.get_history(phone_number, limit=5)
     
-    # 2. Interceptar flujos conversacionales de sesiones activas (Alta, Triage, Tickets, Agenda)
-    
-    # Flujo de ALTA DE CLIENTE activo
     if alta_cliente.esta_en_alta(phone_number):
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de ALTA DE CLIENTE.")
-        return alta_cliente.gestionar_alta(phone_number, content)
+        return await alta_cliente.gestionar_alta(phone_number, content)
 
-    # Flujo de TRIAJE activo
     if phone_number in triaje._triaje_sesiones:
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de TRIAJE.")
-        return triaje.gestionar_triaje(phone_number, content, msg_type)
+        return await triaje.gestionar_triaje(phone_number, content, msg_type)
         
-    # Flujo de TICKETS activo (esperando confirmación de datos extraídos)
     if phone_number in tickets._tickets_pendientes:
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de TICKETS.")
-        return tickets.gestionar_confirmacion_ticket(phone_number, content)
+        return await tickets.gestionar_confirmacion_ticket(phone_number, content)
         
-    # Flujo de AGENDA activo (esperando elección de opción)
     if phone_number in agenda._ofrecidos_temp:
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de AGENDA.")
-        res = agenda.procesar_agenda(phone_number, content, history)
+        res = await agenda.procesar_agenda(phone_number, content, history)
         if res is not None:
             return res
 
-    # 3. Procesar nuevos mensajes según tipo o intención
-    
-    # Si es una IMAGEN nueva
     if msg_type == "image":
-        if os.getenv("MODULO_TICKETS", "true").strip().lower() == "false":
-            return "Lo siento, el módulo de registro de tickets no está habilitado."
+        if os.getenv("MODULO_TICKETS", "true").strip().lower() != "false":
+            media_id = content
+            storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
+            temp_filepath = os.path.join(storage_ruta, "temp", f"ticket_{phone_number}_{int(datetime.now().timestamp())}.jpg")
             
-        media_id = content # En webhook, pasamos el media_id como content
-        storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
-        temp_filepath = os.path.join(storage_ruta, "temp", f"ticket_{phone_number}_{int(datetime.now().timestamp())}.jpg")
-        
-        logger.info(f"Descargando imagen de WhatsApp Media ID: {media_id}...")
-        if whatsapp.download_whatsapp_media(media_id, temp_filepath):
-            return tickets.procesar_mensaje_imagen(phone_number, temp_filepath)
+            logger.info(f"Descargando imagen de WhatsApp Media ID: {media_id}...")
+            if await whatsapp.download_whatsapp_media(media_id, temp_filepath):
+                return await tickets.procesar_mensaje_imagen(phone_number, temp_filepath)
+            else:
+                return "No he podido descargar la imagen que has enviado. Inténtalo de nuevo."
         else:
-            return "No he podido descargar la imagen que has enviado. Inténtalo de nuevo."
+            return "Lo siento, el módulo de registro de tickets no está habilitado."
 
-    # Si es TEXTO, clasificar intención
-    intent = router.detectar_intencion(content)
+    intent = await router.detectar_intencion(content)
     
-    # Comprobar si la intención requiere identificación y el cliente no tiene nombre guardado
     intenciones_requieren_identificacion = ["AGENDA", "FACTURA", "TICKET", "TRIAJE"]
     if intent in intenciones_requieren_identificacion:
         cliente_info = client_memory.get_cliente(phone_number)
@@ -195,23 +177,22 @@ def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str) -> st
             return alta_cliente.iniciar_alta(phone_number, intent, content)
 
     if intent == "AGENDA":
-        return agenda.procesar_agenda(phone_number, content, history)
+        return await agenda.procesar_agenda(phone_number, content, history)
         
     elif intent == "TICKET":
         return "Para registrar un ticket de gasto, por favor envíame directamente la foto del ticket."
         
     elif intent == "FACTURA":
-        return facturas.procesar_solicitud_factura(phone_number, content)
+        return await facturas.procesar_solicitud_factura(phone_number, content)
         
     elif intent == "TRIAJE":
-        return triaje.gestionar_triaje(phone_number, content, msg_type)
+        return await triaje.gestionar_triaje(phone_number, content, msg_type)
         
     elif intent == "COBRADOR":
-        # Conversacionalmente derivamos a chat general
-        return llm.generate_response(content, history, phone_number)
+        return await llm.generate_response(content, history, phone_number)
         
     else:  # CHAT
-        return llm.generate_response(content, history, phone_number)
+        return await llm.generate_response(content, history, phone_number)
 
 @app.post("/webhook")
 async def receive_message(request: Request):
@@ -238,42 +219,32 @@ async def receive_message(request: Request):
                                 
                             logger.info(f"Mensaje recibido de {phone_number} [Tipo: {msg_type}]")
                             
-                            # Interceptar gestor antes de procesar el flujo normal
                             if phone_number == os.getenv("GESTOR_WHATSAPP"):
-                                respuesta_gestor = gestor_mode.procesar_comando(phone_number, content)
+                                respuesta_gestor = await gestor_mode.procesar_comando(phone_number, content)
                                 if respuesta_gestor is not None:
-                                    whatsapp.send_whatsapp_message(phone_number, respuesta_gestor)
+                                    await whatsapp.send_whatsapp_message(phone_number, respuesta_gestor)
                                     continue
                             
-                            # Registrar visita del cliente
                             client_memory.registrar_visita(phone_number)
                             
-                            # Si es texto normal, guardar el mensaje del usuario
                             if msg_type == "text":
                                 database.save_message(phone_number, "user", content)
                             elif msg_type == "image":
                                 database.save_message(phone_number, "user", "[Envía Imagen]")
                                 
-                            # Si hay despedida de cliente, cerrar tickets en gestion si los hubiera
                             escalado_humano.resolver_ticket_si_despedida(phone_number, content)
-                            
-                            # Registrar actividad (iniciar conversación / resetear inactividad)
                             conversation_summary.registrar_actividad(phone_number)
                             
-                            # Procesar flujo
-                            ai_response = procesar_flujo_mensaje(phone_number, content, msg_type)
+                            ai_response = await procesar_flujo_mensaje(phone_number, content, msg_type)
                             
-                            # Guardar y enviar respuesta del bot
                             database.save_message(phone_number, "assistant", ai_response)
-                            whatsapp.send_whatsapp_message(phone_number, ai_response)
+                            await whatsapp.send_whatsapp_message(phone_number, ai_response)
                             
-                            # Detectar si requiere escalado a humanos
                             if escalado_humano.detectar_necesidad_escalado(ai_response):
                                 escalado_humano.crear_ticket_escalado(phone_number, content, ai_response)
                             
-                            # Verificar despedida en el mensaje del usuario
                             if conversation_summary.detectar_despedida(content):
-                                conversation_summary.generar_y_enviar_resumen(phone_number)
+                                await conversation_summary.generar_y_enviar_resumen(phone_number)
             
             return {"status": "success"}
         else:
@@ -291,33 +262,22 @@ async def chat_web(data: dict):
     if not mensaje:
         raise HTTPException(status_code=400, detail="Falta el mensaje")
         
-    # Registrar visita del cliente
     client_memory.registrar_visita(phone_number)
-    
     database.save_message(phone_number, "user", mensaje)
-    
-    # Si hay despedida, resolver tickets
     escalado_humano.resolver_ticket_si_despedida(phone_number, mensaje)
-    
-    # Registrar actividad
     conversation_summary.registrar_actividad(phone_number)
     
-    # Procesamos el flujo igual que WhatsApp (tipo texto)
-    ai_response = procesar_flujo_mensaje(phone_number, mensaje, "text")
-    
+    ai_response = await procesar_flujo_mensaje(phone_number, mensaje, "text")
     database.save_message(phone_number, "assistant", ai_response)
     
-    # Detectar si requiere escalado a humanos
     if escalado_humano.detectar_necesidad_escalado(ai_response):
         escalado_humano.crear_ticket_escalado(phone_number, mensaje, ai_response)
         
-    # Verificar despedida en el mensaje del usuario
     if conversation_summary.detectar_despedida(mensaje):
-        conversation_summary.generar_y_enviar_resumen(phone_number)
+        await conversation_summary.generar_y_enviar_resumen(phone_number)
     
     return {"respuesta": ai_response}
 
-# Endpoint para notificaciones de impago (módulo Cobrador)
 @app.post("/cobrar")
 async def lanzar_cobro(data: dict):
     telefono = data.get("telefono")
@@ -326,7 +286,7 @@ async def lanzar_cobro(data: dict):
     if not telefono or not mensaje:
         raise HTTPException(status_code=400, detail="Falta telefono o mensaje")
         
-    success = cobrador.lanzar_aviso_whatsapp(telefono, mensaje)
+    success = await cobrador.lanzar_aviso_whatsapp(telefono, mensaje)
     return {"status": "success" if success else "error"}
 
 if __name__ == "__main__":

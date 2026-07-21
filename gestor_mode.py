@@ -1,25 +1,24 @@
 import os
 import sqlite3
 import logging
-import requests
+import httpx
+import asyncio
 from datetime import datetime, timedelta
 import whatsapp
 import database
 
 logger = logging.getLogger(__name__)
 
-# Estado de la sesión del gestor para actualización de la base de conocimiento
 _esperando_actualizacion = False
 
-def procesar_comando(phone_number: str, message: str) -> str:
+async def procesar_comando(phone_number: str, message: str) -> str:
     """
-    Procesa los comandos del gestor. Retorna la respuesta de texto correspondiente.
+    Procesa los comandos del gestor de forma asíncrona. Retorna la respuesta de texto correspondiente.
     """
     global _esperando_actualizacion
     
     msg_strip = message.strip()
     
-    # 1. Comprobar si estamos esperando la actualización de la base de conocimiento
     if _esperando_actualizacion:
         _esperando_actualizacion = False
         try:
@@ -27,7 +26,6 @@ def procesar_comando(phone_number: str, message: str) -> str:
             txt_path = os.path.join(dir_path, "knowledge.txt")
             
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # Si el archivo no existe, se creará.
             with open(txt_path, "a", encoding="utf-8") as f:
                 f.write(f"\n\n=== ACTUALIZACIÓN GESTOR ({now_str}) ===\n{msg_strip}\n")
                 
@@ -37,16 +35,14 @@ def procesar_comando(phone_number: str, message: str) -> str:
             logger.error(f"Error escribiendo en knowledge.txt: {e}")
             return "Error al actualizar la base de conocimiento ❌"
             
-    # Interceptar lenguaje natural para la agenda interna
     try:
         import secretaria
-        datos_accion = secretaria.interpretar_mensaje_interno(message)
+        datos_accion = await secretaria.interpretar_mensaje_interno(message)
         if datos_accion is not None:
             return secretaria.ejecutar_accion_interno(datos_accion)
     except Exception as se:
         logger.error(f"Error procesando lenguaje natural con modulo secretaria: {se}")
 
-    # 2. Si no empieza con /, se asume que no es un comando y se procesará como chat normal (devolviendo None)
     if not msg_strip.startswith("/"):
         return None
         
@@ -54,7 +50,6 @@ def procesar_comando(phone_number: str, message: str) -> str:
     cmd = cmd_parts[0].lower()
     args = cmd_parts[1] if len(cmd_parts) > 1 else ""
     
-    # --- COMANDO: /ayuda ---
     if cmd == "/ayuda":
         return (
             "🛠️ *Comandos del Gestor Disponibles:*\n\n"
@@ -79,12 +74,10 @@ def procesar_comando(phone_number: str, message: str) -> str:
             "• `/pendientes_documentos` - Listar documentos pendientes de entrega por clientes."
         )
         
-    # --- COMANDO: /clientes_hoy ---
     elif cmd == "/clientes_hoy":
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # Obtener conversaciones iniciadas hoy
         cursor.execute("""
             SELECT phone_number, inicio 
             FROM conversaciones 
@@ -99,7 +92,6 @@ def procesar_comando(phone_number: str, message: str) -> str:
             
         respuesta = "👥 *Clientes activos hoy:*\n"
         for phone, inicio in rows:
-            # Obtener el primer mensaje enviado por el usuario en esta sesión
             cursor.execute("""
                 SELECT content FROM messages 
                 WHERE phone_number = ? AND role = 'user' AND timestamp >= ?
@@ -113,12 +105,10 @@ def procesar_comando(phone_number: str, message: str) -> str:
         conn.close()
         return respuesta
         
-    # --- COMANDO: /resumen_semana ---
     elif cmd == "/resumen_semana":
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # Obtener resúmenes de conversaciones de los últimos 7 días
         cursor.execute("""
             SELECT phone_number, resumen_texto, inicio
             FROM conversaciones
@@ -156,25 +146,23 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         }
         
         try:
-            response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30)
-            response.raise_for_status()
-            summary_weekly = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-            
-            # Enviar por email al gestor
-            from conversation_summary import enviar_email
-            enviar_email("Semanal", f"<h3>Resumen Ejecutivo Semanal</h3><hr/>{summary_weekly}", comb_text)
-            
-            return f"📊 *Resumen Semanal Generado y Enviado por Correo:*\n\n{summary_weekly}"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
+                summary_weekly = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+                
+                from conversation_summary import enviar_email
+                await enviar_email("Semanal", f"<h3>Resumen Ejecutivo Semanal</h3><hr/>{summary_weekly}", comb_text)
+                
+                return f"📊 *Resumen Semanal Generado y Enviado por Correo:*\n\n{summary_weekly}"
         except Exception as e:
             logger.error(f"Error generando resumen semanal: {e}")
             return f"Error al generar o enviar el resumen semanal: {e}"
             
-    # --- COMANDO: /pendientes ---
     elif cmd == "/pendientes":
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # Buscar resúmenes que puedan contener pendientes
         cursor.execute("""
             SELECT phone_number, resumen_texto 
             FROM conversaciones 
@@ -186,7 +174,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         pendientes = []
         for phone, res in rows:
             res_lower = res.lower()
-            # Si el resumen contiene la palabra pendientes y hay algo no vacío en esa sección
             if "pendiente" in res_lower:
                 pendientes.append(f"• *Cliente: {phone}*\n{res}\n")
                 
@@ -195,33 +182,26 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             
         return "📋 *Pendientes actuales detectados en conversaciones:*\n\n" + "\n".join(pendientes)
         
-    # --- COMANDO: /actualizar ---
     elif cmd == "/actualizar":
         _esperando_actualizacion = True
         return "Manda el nuevo contenido y lo añado a mi base de conocimiento."
         
-    # --- COMANDO: /stats ---
     elif cmd == "/stats":
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # Citas agendadas
         cursor.execute("SELECT COUNT(*) FROM citas WHERE estado = 'confirmada'")
         citas_count = cursor.fetchone()[0]
         
-        # Facturas generadas
         cursor.execute("SELECT COUNT(*) FROM facturas")
         facturas_count = cursor.fetchone()[0]
         
-        # Conversaciones este mes
         cursor.execute("SELECT COUNT(*) FROM conversaciones WHERE inicio >= date('now', 'start of month')")
         convs_month = cursor.fetchone()[0]
         
-        # Tickets de gastos registrados
         cursor.execute("SELECT COUNT(*) FROM gastos_tickets")
         gastos_count = cursor.fetchone()[0]
         
-        # Tickets de escalado pendientes
         cursor.execute("SELECT COUNT(*) FROM tickets_escalados WHERE estado = 'pendiente'")
         tickets_pend = cursor.fetchone()[0]
         
@@ -236,7 +216,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             f"• *Tickets de escalado pendientes:* {tickets_pend}"
         )
 
-    # --- COMANDO: /exportar_gastos ---
     elif cmd == "/exportar_gastos":
         cif = args.strip().upper()
         if not cif:
@@ -251,48 +230,38 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         import io
         import storage_adapter
         
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Gastos"
-        
-        headers = [
-            "Fecha", "Emisor", "CIF Emisor", "Base Imponible", 
-            "% IVA", "Cuota IVA", "Total", "Ruta Archivo", "Fecha Registro"
-        ]
-        ws.append(headers)
-        
-        for g in gastos:
-            ws.append([
-                g["fecha"],
-                g["emisor"],
-                g["cif_emisor"],
-                g["base_imponible"],
-                g["porcentaje_iva"],
-                g["cuota_iva"],
-                g["total"],
-                g["ruta_imagen"],
-                g["creado_en"]
-            ])
+        def _build_excel():
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Gastos"
+            headers = [
+                "Fecha", "Emisor", "CIF Emisor", "Base Imponible", 
+                "% IVA", "Cuota IVA", "Total", "Ruta Archivo", "Fecha Registro"
+            ]
+            ws.append(headers)
+            for g in gastos:
+                ws.append([
+                    g["fecha"], g["emisor"], g["cif_emisor"], g["base_imponible"],
+                    g["porcentaje_iva"], g["cuota_iva"], g["total"], g["ruta_imagen"], g["creado_en"]
+                ])
+            excel_buffer = io.BytesIO()
+            wb.save(excel_buffer)
+            return excel_buffer.getvalue()
             
-        # Guardar en memoria
-        excel_buffer = io.BytesIO()
-        wb.save(excel_buffer)
-        excel_bytes = excel_buffer.getvalue()
+        excel_bytes = await asyncio.to_thread(_build_excel)
         
-        # Subir mediante el storage_adapter
         carpeta_tickets = os.getenv("SHAREPOINT_CARPETA_TICKETS", "gastos_clientes").strip("/")
         fecha_exp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"gastos_{cif}_{fecha_exp}.xlsx"
         logical_path = f"{carpeta_tickets}/{cif}/{filename}"
         
         try:
-            storage_adapter.guardar_archivo(logical_path, excel_bytes)
+            await storage_adapter.guardar_archivo(logical_path, excel_bytes)
             return f"Excel de gastos para el CIF {cif} exportado con éxito en: {logical_path} ✅"
         except Exception as e:
             logger.error(f"Error al subir Excel de gastos a SharePoint: {e}")
             return f"Error al subir el Excel de gastos a SharePoint: {e} ❌"
 
-    # --- COMANDO: /clientes_nuevos ---
     elif cmd == "/clientes_nuevos":
         nuevos = database.get_clientes_nuevos()
         if not nuevos:
@@ -309,7 +278,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         res += "\nPara activar un cliente use:\n`/alta_cliente {telefono} \"{expediente}\" \"{nombre}\"`"
         return res
 
-    # --- COMANDO: /alta_cliente ---
     elif cmd == "/alta_cliente":
         if not args:
             return "Uso: `/alta_cliente {telefono} \"{expediente}\" \"{nombre_opcional}\"`"
@@ -335,7 +303,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         else:
             return f"❌ No se encontró ningún cliente registrado con el teléfono `{phone_target}`."
 
-    # --- COMANDO: /cliente_info ---
     elif cmd == "/cliente_info":
         phone_target = args.strip()
         if not phone_target:
@@ -360,7 +327,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             f"• *Total Conversaciones:* {cli.get('total_conversaciones') or 1}"
         )
 
-    # --- COMANDO: /agenda ---
     elif cmd == "/agenda":
         conn = database.get_connection()
         cursor = conn.cursor()
@@ -388,7 +354,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             respuesta += f"\n• [{day_label}] {icon} *{title}*{hora_str} (ID: {r_id})"
         return respuesta
         
-    # --- COMANDO: /agenda_semana ---
     elif cmd == "/agenda_semana":
         conn = database.get_connection()
         cursor = conn.cursor()
@@ -420,7 +385,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             respuesta += f"  {icon} {title}{hora_str} (ID: {r_id})\n"
         return respuesta
         
-    # --- COMANDO: /plazos ---
     elif cmd == "/plazos":
         conn = database.get_connection()
         cursor = conn.cursor()
@@ -446,7 +410,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             respuesta += f"\n{estado_icon} *{modelo}* ({cliente}) - Límite: {f_limite} (ID: {r_id})"
         return respuesta
         
-    # --- COMANDO: /completar ---
     elif cmd == "/completar":
         if not args:
             return "Por favor, especifica el ID del elemento a completar. Ejemplo: `/completar 12`."
@@ -472,7 +435,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         
         return f"✅ Completado: Se ha marcado como realizado '{row[0]}' ({row[1]})."
         
-    # --- COMANDO: /plazo_fiscal ---
     elif cmd == "/plazo_fiscal":
         if not args:
             return "Uso: `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha} {telefono_opcional}`"
@@ -505,7 +467,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         info_tel = f" (Asociado a cliente `{tel_norm}`)" if tel_norm else ""
         return f"📅 Plazo fiscal añadido: {modelo} para el cliente '{cliente}' con fecha límite {fecha_limite}.{info_tel}"
 
-    # --- COMANDO: /documento_pendiente ---
     elif cmd == "/documento_pendiente":
         if not args:
             return "Uso: `/documento_pendiente {telefono} \"{descripcion}\" {fecha_limite}`"
@@ -525,7 +486,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         tel_norm = database.normalizar_telefono(tel)
         return f"📄 Documento pendiente registrado con éxito (ID: `{doc_id}`) para el cliente `{tel_norm}` con fecha límite {fecha_lim}."
 
-    # --- COMANDO: /documento_recibido ---
     elif cmd == "/documento_recibido":
         if not args:
             return "Uso: `/documento_recibido {id}`"
@@ -540,7 +500,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         else:
             return f"❌ No se encontró ningún documento pendiente con ID {doc_id}."
 
-    # --- COMANDO: /pendientes_documentos ---
     elif cmd == "/pendientes_documentos":
         docs = database.get_todos_documentos_pendientes()
         if not docs:
@@ -558,10 +517,8 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             )
         return res
         
-    # --- COMANDO: /responder_{id} {mensaje} ---
     elif cmd.startswith("/responder_"):
         try:
-            # Extraer ID del comando tipo /responder_123
             ticket_id_str = cmd.replace("/responder_", "")
             ticket_id = int(ticket_id_str)
         except ValueError:
@@ -573,7 +530,6 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # Obtener el teléfono del cliente del ticket
         cursor.execute("SELECT phone_number FROM tickets_escalados WHERE id = ?", (ticket_id,))
         row = cursor.fetchone()
         
@@ -584,12 +540,9 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         client_phone = row[0]
         conn.close()
         
-        # Enviar WhatsApp al cliente
-        enviado = whatsapp.send_whatsapp_message(client_phone, args)
+        enviado = await whatsapp.send_whatsapp_message(client_phone, args)
         if enviado:
-            # Guardar el mensaje del gestor en el historial del cliente
             database.save_message(client_phone, "assistant", f"[Gestor]: {args}")
-            # Cambiar estado del ticket a en_gestion
             from escalado_humano import actualizar_estado_ticket
             actualizar_estado_ticket(ticket_id, "en_gestion")
             return f"Mensaje enviado con éxito al cliente {client_phone} ✅"

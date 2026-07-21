@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import asyncio
 import msal
 
 logger = logging.getLogger("asistente.graph_auth")
@@ -61,8 +62,14 @@ class GraphAuthManager:
             logger.error(err_msg)
             raise RuntimeError(err_msg)
 
+    async def get_token_async(self) -> str:
+        now = time.time()
+        if self._token and self._expires_at > now + 300:
+            return self._token
+        return await asyncio.to_thread(self.get_token)
+
 # Instancia singleton para ser importada por otros adaptadores
 auth_manager = GraphAuthManager()
 
-def get_access_token() -> str:
-    return auth_manager.get_token()
+async def get_access_token() -> str:
+    return await auth_manager.get_token_async()

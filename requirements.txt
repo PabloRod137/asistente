@@ -13,3 +13,5 @@ google-auth==2.27.0
 pymsteams==0.2.2
 pdfplumber==0.11.0
 msal==1.28.0
+httpx>=0.25.0
+

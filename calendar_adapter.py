@@ -1,6 +1,7 @@
 import os
 import logging
-import requests
+import httpx
+import asyncio
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -21,15 +22,14 @@ def _get_google_client():
     service = build('calendar', 'v3', credentials=creds)
     return service
 
-def _get_outlook_events(date_str: str) -> list:
+async def _get_outlook_events(date_str: str) -> list:
     import graph_auth
     email_emisor = os.getenv("EMAIL_EMISOR")
     if not email_emisor:
         raise ValueError("Falta configurar EMAIL_EMISOR para obtener eventos de calendario.")
         
-    token = graph_auth.get_access_token()
+    token = await graph_auth.get_access_token()
     
-    # Rango de fecha: desde las 00:00:00 del día hasta las 23:59:59
     start_dt = f"{date_str}T00:00:00"
     end_dt = f"{date_str}T23:59:59"
     
@@ -47,31 +47,32 @@ def _get_outlook_events(date_str: str) -> list:
     }
     
     logger.info(f"Obteniendo calendarView de Graph para {date_str}...")
-    res = requests.get(url, headers=headers, params=params, timeout=15)
-    res.raise_for_status()
-    
-    events = []
-    for item in res.json().get("value", []):
-        start_val = item["start"]["dateTime"]
-        end_val = item["end"]["dateTime"]
-        try:
-            clean_start = start_val.split('.')[0]
-            clean_end = end_val.split('.')[0]
-            dt_start = datetime.fromisoformat(clean_start)
-            dt_end = datetime.fromisoformat(clean_end)
-            events.append((dt_start, dt_end))
-        except Exception as e:
-            logger.warning(f"Error parseando fechas del evento de Outlook: {e}")
-            
-    return events
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        res = await client.get(url, headers=headers, params=params)
+        res.raise_for_status()
+        
+        events = []
+        for item in res.json().get("value", []):
+            start_val = item["start"]["dateTime"]
+            end_val = item["end"]["dateTime"]
+            try:
+                clean_start = start_val.split('.')[0]
+                clean_end = end_val.split('.')[0]
+                dt_start = datetime.fromisoformat(clean_start)
+                dt_end = datetime.fromisoformat(clean_end)
+                events.append((dt_start, dt_end))
+            except Exception as e:
+                logger.warning(f"Error parseando fechas del evento de Outlook: {e}")
+                
+        return events
 
-def _create_outlook_event(title: str, start: str, end: str, attendee_email: str = None) -> str:
+async def _create_outlook_event(title: str, start: str, end: str, attendee_email: str = None) -> str:
     import graph_auth
     email_emisor = os.getenv("EMAIL_EMISOR")
     if not email_emisor:
         raise ValueError("Falta configurar EMAIL_EMISOR para crear eventos en el calendario.")
         
-    token = graph_auth.get_access_token()
+    token = await graph_auth.get_access_token()
     url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/calendar/events"
     
     headers = {
@@ -102,18 +103,18 @@ def _create_outlook_event(title: str, start: str, end: str, attendee_email: str 
         ]
         
     logger.info(f"Creando evento en el calendario de Outlook para {email_emisor}...")
-    res = requests.post(url, headers=headers, json=payload, timeout=15)
-    res.raise_for_status()
-    
-    return res.json().get("id")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        res = await client.post(url, headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json().get("id")
 
-def _cancel_outlook_event(event_id: str) -> bool:
+async def _cancel_outlook_event(event_id: str) -> bool:
     import graph_auth
     email_emisor = os.getenv("EMAIL_EMISOR")
     if not email_emisor:
         raise ValueError("Falta configurar EMAIL_EMISOR para cancelar eventos en el calendario.")
         
-    token = graph_auth.get_access_token()
+    token = await graph_auth.get_access_token()
     url = f"https://graph.microsoft.com/v1.0/users/{email_emisor}/calendar/events/{event_id}"
     
     headers = {
@@ -121,11 +122,12 @@ def _cancel_outlook_event(event_id: str) -> bool:
     }
     
     logger.info(f"Cancelando evento de Outlook {event_id}...")
-    res = requests.delete(url, headers=headers, timeout=15)
-    res.raise_for_status()
-    return True
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        res = await client.delete(url, headers=headers)
+        res.raise_for_status()
+        return True
 
-def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
+async def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
     """
     date_str: Formato 'YYYY-MM-DD'
     Retorna una lista de diccionarios: [{'start': 'YYYY-MM-DDTHH:MM:SS', 'end': 'YYYY-MM-DDTHH:MM:SS'}]
@@ -133,7 +135,6 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
     calendar_tipo = os.getenv("CALENDAR_TIPO", "outlook").strip().lower()
     logger.info(f"Obteniendo huecos libres para {date_str} usando {calendar_tipo}")
     
-    # 1. Definir los huecos de trabajo posibles (de 09:00 a 18:00 cada 'duration_minutes')
     try:
         base_date = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -156,40 +157,42 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
         })
         current_time += timedelta(minutes=duration_minutes)
 
-    # 2. Intentar usar la API correspondiente o fallback
     events = []
     use_fallback = False
     
     if calendar_tipo == "google":
         try:
-            service = _get_google_client()
-            time_min = f"{date_str}T00:00:00Z"
-            time_max = f"{date_str}T23:59:59Z"
-            
-            events_result = service.events().list(
-                calendarId='primary', 
-                timeMin=time_min,
-                timeMax=time_max, 
-                singleEvents=True,
-                orderBy='startTime'
-            ).execute()
-            
-            for event in events_result.get('items', []):
-                start_str = event['start'].get('dateTime') or event['start'].get('date')
-                end_str = event['end'].get('dateTime') or event['end'].get('date')
-                try:
-                    start_dt = datetime.fromisoformat(start_str.split('+')[0].split('Z')[0])
-                    end_dt = datetime.fromisoformat(end_str.split('+')[0].split('Z')[0])
-                    events.append((start_dt, end_dt))
-                except Exception as ex:
-                    logger.warning(f"Error parseando fechas del evento Google: {ex}")
+            def _get_google_events_sync():
+                service = _get_google_client()
+                time_min = f"{date_str}T00:00:00Z"
+                time_max = f"{date_str}T23:59:59Z"
+                events_result = service.events().list(
+                    calendarId='primary', 
+                    timeMin=time_min,
+                    timeMax=time_max, 
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                res_events = []
+                for event in events_result.get('items', []):
+                    start_str = event['start'].get('dateTime') or event['start'].get('date')
+                    end_str = event['end'].get('dateTime') or event['end'].get('date')
+                    try:
+                        start_dt = datetime.fromisoformat(start_str.split('+')[0].split('Z')[0])
+                        end_dt = datetime.fromisoformat(end_str.split('+')[0].split('Z')[0])
+                        res_events.append((start_dt, end_dt))
+                    except Exception as ex:
+                        logger.warning(f"Error parseando fechas del evento Google: {ex}")
+                return res_events
+
+            events = await asyncio.to_thread(_get_google_events_sync)
         except Exception as e:
             logger.warning(f"Error conectando con Google Calendar: {e}. Usando simulación.")
             use_fallback = True
             
     elif calendar_tipo == "outlook":
         try:
-            events = _get_outlook_events(date_str)
+            events = await _get_outlook_events(date_str)
         except Exception as e:
             logger.warning(
                 f"FALLBACK CALENDARIO: Error conectando con Outlook Calendar vía Graph API: {e}. "
@@ -201,19 +204,16 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
         use_fallback = True
  
     if use_fallback:
-        # Usar la lista de eventos simulados
         for ev_id, ev_info in _simulated_events.items():
             ev_start = datetime.fromisoformat(ev_info["start"])
             ev_end = datetime.fromisoformat(ev_info["end"])
             if ev_start.date() == base_date.date():
                 events.append((ev_start, ev_end))
 
-    # 3. Filtrar los slots potenciales eliminando los que se solapen con eventos
     free_slots = []
     for slot in potential_slots:
         overlap = False
         for ev_start, ev_end in events:
-            # Comprobar solapamiento: (start1 < end2) and (end1 > start2)
             if slot["start"] < ev_end and slot["end"] > ev_start:
                 overlap = True
                 break
@@ -225,7 +225,7 @@ def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
             
     return free_slots
 
-def create_event(title: str, start: str, end: str, attendee_email: str = None) -> dict:
+async def create_event(title: str, start: str, end: str, attendee_email: str = None) -> dict:
     """
     Crea un evento en el calendario.
     start / end en formato ISO 'YYYY-MM-DDTHH:MM:SS'
@@ -237,24 +237,21 @@ def create_event(title: str, start: str, end: str, attendee_email: str = None) -
     
     if calendar_tipo == "google":
         try:
-            service = _get_google_client()
-            event_body = {
-                'summary': title,
-                'start': {
-                    'dateTime': f"{start}",
-                    'timeZone': 'Europe/Madrid',
-                },
-                'end': {
-                    'dateTime': f"{end}",
-                    'timeZone': 'Europe/Madrid',
+            def _create_google_event_sync():
+                service = _get_google_client()
+                event_body = {
+                    'summary': title,
+                    'start': {'dateTime': f"{start}", 'timeZone': 'Europe/Madrid'},
+                    'end': {'dateTime': f"{end}", 'timeZone': 'Europe/Madrid'}
                 }
-            }
-            if attendee_email:
-                event_body['attendees'] = [{'email': attendee_email}]
-                
-            created_event = service.events().insert(calendarId='primary', body=event_body).execute()
+                if attendee_email:
+                    event_body['attendees'] = [{'email': attendee_email}]
+                created_event = service.events().insert(calendarId='primary', body=event_body).execute()
+                return created_event.get("id")
+
+            event_id = await asyncio.to_thread(_create_google_event_sync)
             return {
-                "id": created_event.get("id"),
+                "id": event_id,
                 "status": "success",
                 "tipo": "google"
             }
@@ -264,7 +261,7 @@ def create_event(title: str, start: str, end: str, attendee_email: str = None) -
             
     elif calendar_tipo == "outlook":
         try:
-            event_id = _create_outlook_event(title, start, end, attendee_email)
+            event_id = await _create_outlook_event(title, start, end, attendee_email)
             return {
                 "id": event_id,
                 "status": "success",
@@ -295,7 +292,7 @@ def create_event(title: str, start: str, end: str, attendee_email: str = None) -
             "tipo": "simulated"
         }
 
-def cancel_event(event_id: str) -> bool:
+async def cancel_event(event_id: str) -> bool:
     """
     Cancela/elimina el evento con el ID indicado.
     """
@@ -311,16 +308,18 @@ def cancel_event(event_id: str) -> bool:
         
     if calendar_tipo == "google":
         try:
-            service = _get_google_client()
-            service.events().delete(calendarId='primary', eventId=event_id).execute()
-            return True
+            def _cancel_google_event_sync():
+                service = _get_google_client()
+                service.events().delete(calendarId='primary', eventId=event_id).execute()
+                return True
+            return await asyncio.to_thread(_cancel_google_event_sync)
         except Exception as e:
             logger.error(f"Error cancelando evento en Google Calendar: {e}")
             return False
             
     elif calendar_tipo == "outlook":
         try:
-            return _cancel_outlook_event(event_id)
+            return await _cancel_outlook_event(event_id)
         except Exception as e:
             logger.error(f"Error cancelando evento en Outlook Calendar vía Graph API: {e}")
             return False

@@ -8,10 +8,10 @@ import whatsapp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("modulos.recordatorios")
 
-def procesar_recordatorios_documentos() -> int:
+async def procesar_recordatorios_documentos() -> int:
     """
     Consulta los documentos pendientes con fecha límite cercana (días configurables)
-    y envía un WhatsApp directo al cliente recordando su entrega.
+    y envía un WhatsApp directo al cliente recordando su entrega de forma asíncrona.
     Si la fecha límite ya pasó, cancela el envío automático.
     Incrementa 'veces_recordado' y actualiza 'ultimo_recordatorio_fecha'.
     """
@@ -40,7 +40,7 @@ def procesar_recordatorios_documentos() -> int:
         )
         
         try:
-            whatsapp.send_whatsapp_message(phone, mensaje)
+            await whatsapp.send_whatsapp_message(phone, mensaje)
             database.incrementar_recordatorio_documento(doc["id"])
             enviados += 1
             logger.info(f"Enviado recordatorio de documento #{doc['id']} a {phone} ({nombre}).")
@@ -49,9 +49,9 @@ def procesar_recordatorios_documentos() -> int:
             
     return enviados
 
-def procesar_recordatorios_plazos_fiscales() -> int:
+async def procesar_recordatorios_plazos_fiscales() -> int:
     """
-    Consulta los plazos fiscales con teléfono de cliente asignado y fecha límite cercana.
+    Consulta los plazos fiscales con teléfono de cliente asignado y fecha límite cercana de forma asíncrona.
     Envía un WhatsApp directo notificando la fecha límite.
     Marca 'recordatorio_enviado = 1' para no repetir.
     """
@@ -82,7 +82,7 @@ def procesar_recordatorios_plazos_fiscales() -> int:
         )
         
         try:
-            whatsapp.send_whatsapp_message(phone, mensaje)
+            await whatsapp.send_whatsapp_message(phone, mensaje)
             database.marcar_plazo_fiscal_recordado(plazo["id"])
             enviados += 1
             logger.info(f"Enviado recordatorio de plazo fiscal #{plazo['id']} a {phone} ({nombre}).")
@@ -91,13 +91,13 @@ def procesar_recordatorios_plazos_fiscales() -> int:
             
     return enviados
 
-def procesar_todos_los_recordatorios() -> dict:
+async def procesar_todos_los_recordatorios() -> dict:
     """
-    Ejecuta el ciclo completo de recordatorios automáticos (documentos y plazos fiscales).
+    Ejecuta el ciclo completo de recordatorios automáticos (documentos y plazos fiscales) de forma asíncrona.
     """
     logger.info("--- Iniciando ciclo de recordatorios automáticos ---")
-    docs_count = procesar_recordatorios_documentos()
-    plazos_count = procesar_recordatorios_plazos_fiscales()
+    docs_count = await procesar_recordatorios_documentos()
+    plazos_count = await procesar_recordatorios_plazos_fiscales()
     summary = {
         "recordatorios_documentos_enviados": docs_count,
         "recordatorios_fiscales_enviados": plazos_count

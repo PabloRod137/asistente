@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import pdfplumber
 
 logger = logging.getLogger(__name__)
@@ -26,17 +27,14 @@ def cargar_conocimiento() -> str:
     if os.path.exists(pdf_path):
         current_mtimes[pdf_path] = os.path.getmtime(pdf_path)
         
-    # Si no existe ningún archivo de conocimiento, limpiamos caché y retornamos vacío
     if not current_mtimes:
         _cached_content = ""
         _last_mtimes = {}
         return ""
         
-    # Si las marcas de tiempo coinciden exactamente con la caché, devolvemos la caché
     if current_mtimes == _last_mtimes:
         return _cached_content
         
-    # Recargar contenido
     loaded_parts = []
     
     if txt_path in current_mtimes:
@@ -63,10 +61,13 @@ def cargar_conocimiento() -> str:
     _cached_content = "\n\n".join(loaded_parts)
     _last_mtimes = current_mtimes
 
-    # Parsear plazos fiscales de forma automática ante cambios en el conocimiento
     try:
         import secretaria
-        secretaria.parsear_y_guardar_plazos_txt(_cached_content)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(secretaria.parsear_y_guardar_plazos_txt(_cached_content))
+        except RuntimeError:
+            asyncio.run(secretaria.parsear_y_guardar_plazos_txt(_cached_content))
     except Exception as se:
         logger.error(f"Error procesando plazos fiscales en base de conocimiento: {se}")
 
