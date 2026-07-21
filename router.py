@@ -12,10 +12,22 @@ def detectar_intencion(message: str) -> str:
     # Reglas duras (heurísticas rápidas) para optimización y robustez ante fallos de la API
     if message:
         msg_lower = message.lower().strip()
+        if "cita" in msg_lower or "reservar" in msg_lower or "agendar" in msg_lower:
+            if os.getenv("MODULO_AGENDA", "true").strip().lower() != "false":
+                logger.info("Heurística de intención detectada: AGENDA")
+                return "AGENDA"
         if "factura" in msg_lower:
             if os.getenv("MODULO_FACTURAS", "true").strip().lower() != "false":
                 logger.info("Heurística de intención detectada: FACTURA")
                 return "FACTURA"
+        if "ticket" in msg_lower or "gasto" in msg_lower:
+            if os.getenv("MODULO_TICKETS", "true").strip().lower() != "false":
+                logger.info("Heurística de intención detectada: TICKET")
+                return "TICKET"
+        if "averia" in msg_lower or "avería" in msg_lower or "presupuesto" in msg_lower:
+            if os.getenv("MODULO_TRIAJE", "true").strip().lower() != "false":
+                logger.info("Heurística de intención detectada: TRIAJE")
+                return "TRIAJE"
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:

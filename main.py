@@ -19,7 +19,7 @@ import database
 import llm
 import whatsapp
 import router
-from modulos import agenda, tickets, facturas, triaje, cobrador
+from modulos import agenda, tickets, facturas, triaje, cobrador, alta_cliente
 import conversation_summary
 import knowledge_base
 import gestor_mode
@@ -124,8 +124,13 @@ def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str) -> st
     # 1. Obtener historial para contexto
     history = database.get_history(phone_number, limit=5)
     
-    # 2. Interceptar flujos conversacionales de sesiones activas (Triage o Tickets o Reserva)
+    # 2. Interceptar flujos conversacionales de sesiones activas (Alta, Triage, Tickets, Agenda)
     
+    # Flujo de ALTA DE CLIENTE activo
+    if alta_cliente.esta_en_alta(phone_number):
+        logger.info(f"Derivando mensaje de {phone_number} a sesión activa de ALTA DE CLIENTE.")
+        return alta_cliente.gestionar_alta(phone_number, content)
+
     # Flujo de TRIAJE activo
     if phone_number in triaje._triaje_sesiones:
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de TRIAJE.")
@@ -163,6 +168,14 @@ def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str) -> st
     # Si es TEXTO, clasificar intención
     intent = router.detectar_intencion(content)
     
+    # Comprobar si la intención requiere identificación y el cliente no tiene nombre guardado
+    intenciones_requieren_identificacion = ["AGENDA", "FACTURA", "TICKET", "TRIAJE"]
+    if intent in intenciones_requieren_identificacion:
+        cliente_info = client_memory.get_cliente(phone_number)
+        if not cliente_info or not cliente_info.get("nombre"):
+            logger.info(f"Cliente {phone_number} solicita {intent} sin estar registrado. Activando alta_cliente...")
+            return alta_cliente.iniciar_alta(phone_number, intent, content)
+
     if intent == "AGENDA":
         return agenda.procesar_agenda(phone_number, content, history)
         
