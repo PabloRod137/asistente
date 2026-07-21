@@ -59,6 +59,9 @@ def procesar_comando(phone_number: str, message: str) -> str:
         return (
             "🛠️ *Comandos del Gestor Disponibles:*\n\n"
             "• `/clientes_hoy` - Ver clientes activos hoy y motivo.\n"
+            "• `/clientes_nuevos` - Listar clientes pendientes de revisión CRM.\n"
+            "• `/alta_cliente {tel} \"{exp}\" \"{nom}\"` - Activar cliente y asignar expediente.\n"
+            "• `/cliente_info {tel}` - Consulta ficha completa de un cliente.\n"
             "• `/resumen_semana` - Genera y envía resumen semanal por email.\n"
             "• `/pendientes` - Lista clientes con pendientes para el gestor.\n"
             "• `/actualizar` - Añadir nueva información a la base de conocimiento.\n"
@@ -285,6 +288,74 @@ Por favor, sé conciso y estructurado, usa viñetas."""
         except Exception as e:
             logger.error(f"Error al subir Excel de gastos a SharePoint: {e}")
             return f"Error al subir el Excel de gastos a SharePoint: {e} ❌"
+
+    # --- COMANDO: /clientes_nuevos ---
+    elif cmd == "/clientes_nuevos":
+        nuevos = database.get_clientes_nuevos()
+        if not nuevos:
+            return "📋 No hay clientes nuevos pendientes de revisión."
+            
+        res = f"📋 *Clientes Nuevos Pendientes de Revisión ({len(nuevos)}):*\n\n"
+        for c in nuevos:
+            tel = c["phone_number"]
+            nom = c["nombre"] or "Sin nombre"
+            nif = c["nif_cif"] or "Sin NIF/CIF"
+            fecha = c["fecha_alta"] or c["primera_visita"] or "N/A"
+            res += f"• *{nom}* (`{tel}`)\n  - NIF/CIF: `{nif}`\n  - Fecha Alta: {fecha}\n"
+            
+        res += "\nPara activar un cliente use:\n`/alta_cliente {telefono} \"{expediente}\" \"{nombre}\"`"
+        return res
+
+    # --- COMANDO: /alta_cliente ---
+    elif cmd == "/alta_cliente":
+        if not args:
+            return "Uso: `/alta_cliente {telefono} \"{expediente}\" \"{nombre_opcional}\"`"
+            
+        import shlex
+        try:
+            tokens = shlex.split(args)
+        except Exception:
+            tokens = args.split()
+            
+        if len(tokens) < 2:
+            return "Uso: `/alta_cliente {telefono} \"{expediente}\" \"{nombre_opcional}\"`"
+            
+        phone_target = tokens[0].strip()
+        expediente = tokens[1].strip()
+        nombre_opt = tokens[2].strip() if len(tokens) > 2 else None
+        
+        ok = database.activar_cliente(phone_target, expediente, nombre_opcional=nombre_opt)
+        if ok:
+            cli = database.get_cliente_by_phone(phone_target)
+            nombre_final = cli.get("nombre") if cli else (nombre_opt or phone_target)
+            return f"✅ Cliente `{phone_target}` (*{nombre_final}*) activado con éxito con expediente `{expediente}`."
+        else:
+            return f"❌ No se encontró ningún cliente registrado con el teléfono `{phone_target}`."
+
+    # --- COMANDO: /cliente_info ---
+    elif cmd == "/cliente_info":
+        phone_target = args.strip()
+        if not phone_target:
+            return "Uso: `/cliente_info {telefono}`"
+            
+        cli = database.get_cliente_by_phone(phone_target)
+        if not cli:
+            return f"❌ No existe ningún cliente con el teléfono `{phone_target}`."
+            
+        return (
+            f"👤 *Ficha del Cliente:* `{phone_target}`\n"
+            f"• *Nombre:* {cli.get('nombre') or 'Sin nombre'}\n"
+            f"• *Estado CRM:* `{cli.get('tipo_cliente') or 'nuevo'}`\n"
+            f"• *Expediente:* `{cli.get('numero_expediente') or 'Sin expediente'}`\n"
+            f"• *NIF/CIF:* `{cli.get('nif_cif') or 'Sin NIF/CIF'}`\n"
+            f"• *Empresa:* {cli.get('empresa') or 'No indicada'}\n"
+            f"• *Email:* {cli.get('email') or 'No indicado'}\n"
+            f"• *Gestor Asignado:* {cli.get('gestor_asignado') or 'No asignado'}\n"
+            f"• *Notas:* {cli.get('notas') or 'Sin notas'}\n"
+            f"• *Primera Visita:* {cli.get('primera_visita') or 'N/A'}\n"
+            f"• *Última Visita:* {cli.get('ultima_visita') or 'N/A'}\n"
+            f"• *Total Conversaciones:* {cli.get('total_conversaciones') or 1}"
+        )
 
     # --- COMANDO: /agenda ---
     elif cmd == "/agenda":
