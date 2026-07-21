@@ -195,7 +195,7 @@ async def get_free_slots(date_str: str, duration_minutes: int = 60) -> list:
             events = await _get_outlook_events(date_str)
         except Exception as e:
             logger.warning(
-                f"FALLBACK CALENDARIO: Error conectando con Outlook Calendar vía Graph API: {e}. "
+                f"FALLBACK CALENDARIO: Error conectando con Outlook Calendar vía Graph API (fecha '{date_str}'): {e}. "
                 f"Cayendo automáticamente a simulación en memoria.", 
                 exc_info=True
             )
@@ -256,7 +256,7 @@ async def create_event(title: str, start: str, end: str, attendee_email: str = N
                 "tipo": "google"
             }
         except Exception as e:
-            logger.warning(f"Error creando evento en Google Calendar: {e}. Usando simulación.")
+            logger.warning(f"Error creando evento '{title}' en Google Calendar: {e}. Usando simulación.")
             use_fallback = True
             
     elif calendar_tipo == "outlook":
@@ -269,7 +269,7 @@ async def create_event(title: str, start: str, end: str, attendee_email: str = N
             }
         except Exception as e:
             logger.warning(
-                f"FALLBACK CALENDARIO: Error creando evento en Outlook Calendar vía Graph API: {e}. "
+                f"FALLBACK CALENDARIO: Error creando evento '{title}' en Outlook Calendar vía Graph API: {e}. "
                 f"Cayendo automáticamente a simulación en memoria.", 
                 exc_info=True
             )
