@@ -61,6 +61,8 @@ Notas: {notas}
 ===========================================
 INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por su nombre y atiende su consulta usando la información de su perfil/expediente si aplica."""
 
+    modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
+    
     # URL de Gemini REST API
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
@@ -86,15 +88,23 @@ INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por 
         "contents": contents
     }
 
-    try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-        
-    except Exception as e:
-        logger.error(f"Error conectando con Gemini en llm.py: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Detalles: {e.response.text}")
-        return "Lo siento, ha ocurrido un error procesando tu mensaje. Inténtalo de nuevo."
+    if not modo_test:
+        try:
+            response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            logger.error(f"Error conectando con Gemini en llm.py: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Detalles: {e.response.text}")
+
+    # Fallback simulado de IA (usado en MODO_TEST o cuando la API key de Gemini esté agotada/restringida)
+    import client_memory
+    cli_info = client_memory.get_cliente(phone_number)
+    if cli_info and cli_info.get("nombre"):
+        nom = cli_info.get("nombre")
+        exp = cli_info.get("numero_expediente") or "Pendiente"
+        return f"¡Hola {nom}! Encantado de saludarte de nuevo. Veo que tu expediente es {exp}. ¿En qué te puedo ayudar hoy?"
+    else:
+        return "¡Hola! Gracias por escribirnos. Estamos a tu disposición para informarte de nuestros servicios, horarios y tarifas. ¿En qué te puedo ayudar?"
