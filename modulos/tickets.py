@@ -14,9 +14,8 @@ import storage_adapter
 
 logger = logging.getLogger(__name__)
 
-# Memoria temporal en sesión para tickets pendientes de confirmación
-# { "phone_number": { "temp_path": "...", "datos": {...} } }
-_tickets_pendientes = {}
+def esta_en_ticket(phone_number: str) -> bool:
+    return database.get_session(phone_number, "ticket") is not None
 
 def sanitizar_nombre_archivo(texto):
     if not texto:
@@ -78,7 +77,7 @@ async def guardar_registro_gasto(phone_number: str, temp_image_path: str, datos:
 async def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> str:
     """
     Cuando se recibe una imagen por WhatsApp, se procesa con Gemini Vision para OCR,
-    y se le pide confirmación al usuario de los datos fiscales extraídos de forma asíncrona.
+    y se le pide confirmación al usuario guardando la sesión en SQLite de forma asíncrona.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -156,10 +155,10 @@ async def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> st
         if advertencia:
             datos_procesados["advertencia"] = advertencia
 
-        _tickets_pendientes[phone_number] = {
+        database.save_session(phone_number, "ticket", {
             "temp_path": temp_image_path,
             "datos": datos_procesados
-        }
+        })
         
         msg = (
             "🔍 *Datos extraídos de tu ticket:*\n\n"
@@ -189,9 +188,9 @@ async def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> st
 
 async def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
     """
-    Comprueba si el usuario tiene un ticket pendiente y responde a las opciones de forma asíncrona.
+    Comprueba si el usuario tiene un ticket pendiente en SQLite y responde a las opciones de forma asíncrona.
     """
-    ticket_session = _tickets_pendientes.get(phone_number)
+    ticket_session = database.get_session(phone_number, "ticket")
     if not ticket_session:
         return None
         
@@ -210,7 +209,7 @@ async def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            del _tickets_pendientes[phone_number]
+            database.delete_session(phone_number, "ticket")
             
         return respuesta
         
@@ -218,7 +217,7 @@ async def gestionar_confirmacion_ticket(phone_number: str, message: str) -> str:
         temp_path = ticket_session["temp_path"]
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        del _tickets_pendientes[phone_number]
+        database.delete_session(phone_number, "ticket")
         return "Ticket descartado. ❌ Si quieres puedes enviarme otra foto."
         
     return "Tengo un ticket pendiente de confirmación. Por favor responde:\n1. Si es correcto\n2. Si deseas descartarlo"

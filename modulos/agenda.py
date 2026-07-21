@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import calendar_adapter
+import database
 from database import save_cita, get_active_cita, update_cita_estado, save_message
 from whatsapp import send_whatsapp_message
 
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-# Memoria temporal para guardar los huecos ofrecidos a cada teléfono
-_ofrecidos_temp = {}
+def esta_en_oferta(phone_number: str) -> bool:
+    return database.get_session(phone_number, "agenda_oferta") is not None
 
 async def enviar_recordatorio_24h(phone: str, fecha_cita: str):
     mensaje = f"⏰ Recordatorio: Tienes una cita reservada para mañana: {fecha_cita}. ¡Te esperamos!"
@@ -26,16 +27,15 @@ async def enviar_recordatorio_24h(phone: str, fecha_cita: str):
 
 async def procesar_agenda(phone_number: str, message: str, history: list) -> str:
     """
-    Gestiona el flujo conversacional de la agenda utilizando Gemini para extraer la intención específica de forma asíncrona.
+    Gestiona el flujo conversacional de la agenda utilizando Gemini para extraer la intención específica de forma asíncrona,
+    con persistencia SQLite de huecos ofrecidos.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "Lo siento, la agenda no está disponible porque el servicio de IA no está configurado."
 
-    # Usar Gemini para analizar la conversación y entender la acción de la agenda
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
-    # Preparar el contexto conversacional reciente para Gemini
     contexto = []
     for msg in history[-4:]:
         contexto.append(f"{msg['role']}: {msg['content']}")
@@ -95,7 +95,7 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
         if not slots:
             return f"Lo siento, no me quedan huecos libres para el {fecha_req}. ¿Te viene bien otra fecha?"
             
-        _ofrecidos_temp[phone_number] = slots
+        database.save_session(phone_number, "agenda_oferta", {"slots": slots})
         
         respuesta = f"Aquí tienes los huecos disponibles para el {fecha_req}:\n"
         for idx, slot in enumerate(slots, 1):
@@ -106,7 +106,8 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
 
     # --- ACCIÓN: CONFIRMAR RESERVA ---
     elif accion == "reservar":
-        slots_ofrecidos = _ofrecidos_temp.get(phone_number)
+        session_oferta = database.get_session(phone_number, "agenda_oferta")
+        slots_ofrecidos = session_oferta.get("slots") if session_oferta else None
         
         if opcion_req and slots_ofrecidos and 1 <= opcion_req <= len(slots_ofrecidos):
             slot_elegido = slots_ofrecidos[opcion_req - 1]
@@ -139,8 +140,7 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
             
             save_cita(phone_number, event_id, slot_elegido["start"], servicio_req, "confirmada")
             
-            if phone_number in _ofrecidos_temp:
-                del _ofrecidos_temp[phone_number]
+            database.delete_session(phone_number, "agenda_oferta")
                 
             try:
                 run_time = start_dt - timedelta(hours=24)
@@ -178,6 +178,5 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
         else:
             return "Lo siento, no he podido cancelar la cita en el calendario. Por favor, inténtalo más tarde."
 
-    # --- FALLBACK: CONVERSACIÓN / PREGUNTAS ---
     else:
         return None

@@ -5,43 +5,24 @@ import database
 
 logger = logging.getLogger(__name__)
 
-# Memoria temporal de la sesión de alta de cliente
-# { phone_number: { "paso": "nombre", "nombre": None, "nif_cif": None, "motivo": None, "intencion_original": "...", "mensaje_original": "...", "timestamp": datetime } }
-_alta_sesiones = {}
 TIMEOUT_MINUTOS_ALTA = 15
 
-def limpiar_sesiones_expiradas():
-    """
-    Limpia sesiones abandonadas que hayan superado el tiempo límite de inactividad.
-    """
-    ahora = datetime.now()
-    expirados = []
-    for phone, sesion in _alta_sesiones.items():
-        if ahora - sesion.get("timestamp", ahora) > timedelta(minutes=TIMEOUT_MINUTOS_ALTA):
-            expirados.append(phone)
-            
-    for phone in expirados:
-        logger.info(f"Limpiando sesión expirada de alta de cliente para {phone}")
-        _alta_sesiones.pop(phone, None)
-
 def esta_en_alta(phone_number: str) -> bool:
-    limpiar_sesiones_expiradas()
-    return phone_number in _alta_sesiones
+    return database.get_session(phone_number, "alta_cliente") is not None
 
 def iniciar_alta(phone_number: str, intencion_original: str, mensaje_original: str) -> str:
     """
-    Inicia el flujo de registro/alta para un cliente nuevo que solicita una acción que requiere datos.
+    Inicia el flujo de registro/alta para un cliente nuevo persistiéndolo en SQLite de forma asíncrona.
     """
-    limpiar_sesiones_expiradas()
-    _alta_sesiones[phone_number] = {
+    sesion = {
         "paso": "nombre",
         "nombre": None,
         "nif_cif": None,
         "motivo": None,
         "intencion_original": intencion_original,
-        "mensaje_original": mensaje_original,
-        "timestamp": datetime.now()
+        "mensaje_original": mensaje_original
     }
+    database.save_session(phone_number, "alta_cliente", sesion)
     logger.info(f"Iniciado flujo de alta de cliente para {phone_number} (Intención original: {intencion_original})")
     
     return (
@@ -52,14 +33,12 @@ def iniciar_alta(phone_number: str, intencion_original: str, mensaje_original: s
 
 async def gestionar_alta(phone_number: str, content: str) -> str:
     """
-    Procesa las respuestas del cliente dentro de la máquina de estados de alta de forma asíncrona.
+    Procesa las respuestas del cliente dentro de la máquina de estados de alta persistiéndolas en SQLite de forma asíncrona.
     """
-    limpiar_sesiones_expiradas()
-    if phone_number not in _alta_sesiones:
+    sesion = database.get_session(phone_number, "alta_cliente")
+    if not sesion:
         return "No hay ninguna sesión de registro activa. ¿En qué puedo ayudarte?"
 
-    sesion = _alta_sesiones[phone_number]
-    sesion["timestamp"] = datetime.now()
     paso = sesion["paso"]
     text_clean = content.strip()
 
@@ -70,6 +49,7 @@ async def gestionar_alta(phone_number: str, content: str) -> str:
             
         sesion["nombre"] = text_clean
         sesion["paso"] = "nif"
+        database.save_session(phone_number, "alta_cliente", sesion)
         return (
             f"Muchas gracias, *{text_clean}*.\n\n"
             "Para completar tu ficha, ¿podrías indicarme tu *NIF/CIF o DNI*? "
@@ -84,6 +64,7 @@ async def gestionar_alta(phone_number: str, content: str) -> str:
             sesion["nif_cif"] = text_clean.upper()
             
         sesion["paso"] = "motivo"
+        database.save_session(phone_number, "alta_cliente", sesion)
         return (
             "¡Perfecto! Por último, indícame brevemente el *motivo principal* "
             "de tu consulta o gestión:"
@@ -98,7 +79,6 @@ async def gestionar_alta(phone_number: str, content: str) -> str:
         intencion = sesion["intencion_original"]
         mensaje_orig = sesion["mensaje_original"]
 
-        # Guardar en SQLite
         conn = database.get_connection()
         cursor = conn.cursor()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -123,7 +103,7 @@ async def gestionar_alta(phone_number: str, content: str) -> str:
         conn.close()
         logger.info(f"Completado registro de alta para {phone_number} ({nombre})")
 
-        _alta_sesiones.pop(phone_number, None)
+        database.delete_session(phone_number, "alta_cliente")
 
         res_bienvenida = f"✅ *Registro completado.* ¡Gracias {nombre}!\n\n"
         

@@ -7,12 +7,12 @@ from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 import whatsapp
+import database
 
 logger = logging.getLogger(__name__)
 
-# Memoria temporal de la sesión de triaje
-# { phone_number: { "descripcion": "...", "cp": "...", "urgencia": "...", "foto_path": "...", "estado": "..." } }
-_triaje_sesiones = {}
+def esta_en_triaje(phone_number: str) -> bool:
+    return database.get_session(phone_number, "triaje") is not None
 
 async def enviar_email_profesional(datos: dict, datos_ia: dict, foto_path: str) -> bool:
     import email_adapter
@@ -159,12 +159,12 @@ async def analizar_solicitud_con_ia(datos: dict) -> dict:
 
 async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "text") -> str:
     """
-    Máquina de estados conversacional para el triaje de forma asíncrona.
+    Máquina de estados conversacional para el triaje con persistencia SQLite.
     """
-    session = _triaje_sesiones.get(phone_number)
+    session = database.get_session(phone_number, "triaje")
     
     if not session:
-        _triaje_sesiones[phone_number] = {
+        session = {
             "phone_number": phone_number,
             "descripcion": "",
             "cp": "",
@@ -172,6 +172,7 @@ async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "tex
             "foto_path": None,
             "estado": "esperando_descripcion"
         }
+        database.save_session(phone_number, "triaje", session)
         return (
             "🛠️ *Formulario de Solicitud de Presupuesto*\n\n"
             "Por favor, describe en detalle qué avería o trabajo necesitas que realicemos (mínimo 20 caracteres):"
@@ -179,6 +180,7 @@ async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "tex
 
     if msg_type == "image":
         session["foto_path"] = message
+        database.save_session(phone_number, "triaje", session)
         logger.info(f"Foto de triaje guardada para {phone_number} en {message}")
         
         if session["estado"] == "esperando_descripcion":
@@ -198,6 +200,7 @@ async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "tex
             return "La descripción debe tener al menos 20 caracteres para que el profesional pueda entenderla. Cuéntame un poco más:"
         session["descripcion"] = message.strip()
         session["estado"] = "esperando_cp"
+        database.save_session(phone_number, "triaje", session)
         return "Guardado. 📍 Facilítame ahora tu Código Postal (5 dígitos) de España:"
 
     elif session["estado"] == "esperando_cp":
@@ -206,6 +209,7 @@ async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "tex
             return "El código postal debe constar de exactamente 5 números. Por favor, indícalo de nuevo:"
         session["cp"] = cp_clean
         session["estado"] = "esperando_urgencia"
+        database.save_session(phone_number, "triaje", session)
         return (
             "Entendido. ¿Cuál es el nivel de urgencia para este trabajo?\n"
             "1. Urgente (requiere atención rápida)\n"
@@ -262,8 +266,8 @@ async def gestionar_triaje(phone_number: str, message: str, msg_type: str = "tex
                 logger.info(f"Foto temporal de triaje eliminada tras procesar: {foto_path}")
             except Exception as fe:
                 logger.error(f"Error al eliminar foto temporal de triaje finalizado: {fe}")
-        del _triaje_sesiones[phone_number]
         
+        database.delete_session(phone_number, "triaje")
         return "¡Perfecto! Tu solicitud ha sido registrada y enviada al profesional correspondiente. Se pondrán en contacto contigo lo antes posible. ¡Gracias! 👍"
 
 async def limpiar_archivos_temporales_antiguos():

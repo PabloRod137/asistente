@@ -224,6 +224,17 @@ def init_db():
         )
     ''')
     
+    # Tabla sesiones_activas (Fase 5.2 - Persistencia de sesiones en SQLite)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sesiones_activas (
+            phone_number TEXT NOT NULL,
+            tipo_sesion TEXT NOT NULL,
+            datos_json TEXT NOT NULL,
+            actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (phone_number, tipo_sesion)
+        )
+    ''')
+    
     conn.commit()
     
     # Ejecutar la migración de autoincrement sobre la tabla facturas si fuese necesario
@@ -577,3 +588,68 @@ def marcar_plazo_fiscal_recordado(plazo_id: int) -> bool:
     conn.commit()
     conn.close()
     return affected > 0
+
+# Funciones de utilidad para sesiones activas (Fase 5.2)
+import json
+
+def save_session(phone_number: str, tipo_sesion: str, data: dict):
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    datos_str = json.dumps(data)
+    cursor.execute('''
+        INSERT INTO sesiones_activas (phone_number, tipo_sesion, datos_json, actualizado_en)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(phone_number, tipo_sesion) DO UPDATE SET
+            datos_json = excluded.datos_json,
+            actualizado_en = excluded.actualizado_en
+    ''', (phone_number, tipo_sesion, datos_str, now_str))
+    conn.commit()
+    conn.close()
+
+def get_session(phone_number: str, tipo_sesion: str) -> dict | None:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT datos_json FROM sesiones_activas
+        WHERE phone_number = ? AND tipo_sesion = ?
+    ''', (phone_number, tipo_sesion))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return None
+    return None
+
+def delete_session(phone_number: str, tipo_sesion: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        DELETE FROM sesiones_activas
+        WHERE phone_number = ? AND tipo_sesion = ?
+    ''', (phone_number, tipo_sesion))
+    conn.commit()
+    conn.close()
+
+def clear_expired_sessions(tipo_sesion: str = None, timeout_seconds: int = 900):
+    conn = get_connection()
+    cursor = conn.cursor()
+    if tipo_sesion:
+        cursor.execute('''
+            DELETE FROM sesiones_activas
+            WHERE tipo_sesion = ? AND strftime('%s', 'now') - strftime('%s', actualizado_en) > ?
+        ''', (tipo_sesion, timeout_seconds))
+    else:
+        cursor.execute('''
+            DELETE FROM sesiones_activas
+            WHERE strftime('%s', 'now') - strftime('%s', actualizado_en) > ?
+        ''', (timeout_seconds,))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    if count > 0:
+        logger.info(f"Purga de sesiones expiradas: eliminadas {count} sesión(es) antiguas.")
+    return count
+

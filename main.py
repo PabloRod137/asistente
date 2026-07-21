@@ -113,6 +113,20 @@ async def on_startup():
     except Exception as e:
         logger.error(f"Error programando limpieza periódica de temporales: {e}")
 
+    # Programar purga periódica de sesiones expiradas en SQLite (cada 15 minutos)
+    try:
+        scheduler.add_job(
+            database.clear_expired_sessions,
+            trigger="interval",
+            minutes=15,
+            id="purga_sesiones_expiradas",
+            replace_existing=True
+        )
+        logger.info("Programada purga periódica de sesiones expiradas en SQLite (cada 15 minutos).")
+    except Exception as e:
+        logger.error(f"Error programando purga periódica de sesiones expiradas: {e}")
+
+
 @app.get("/")
 def read_root():
     return {"status": "online", "message": f"{APP_NAME} en marcha y operativo."}
@@ -135,19 +149,23 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
     """
     history = database.get_history(phone_number, limit=5)
     
+    # Flujo de ALTA DE CLIENTE activo
     if alta_cliente.esta_en_alta(phone_number):
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de ALTA DE CLIENTE.")
         return await alta_cliente.gestionar_alta(phone_number, content)
 
-    if phone_number in triaje._triaje_sesiones:
+    # Flujo de TRIAJE activo
+    if triaje.esta_en_triaje(phone_number):
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de TRIAJE.")
         return await triaje.gestionar_triaje(phone_number, content, msg_type)
         
-    if phone_number in tickets._tickets_pendientes:
+    # Flujo de TICKETS activo (esperando confirmación de datos extraídos)
+    if tickets.esta_en_ticket(phone_number):
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de TICKETS.")
         return await tickets.gestionar_confirmacion_ticket(phone_number, content)
         
-    if phone_number in agenda._ofrecidos_temp:
+    # Flujo de AGENDA activo (esperando elección de opción)
+    if agenda.esta_en_oferta(phone_number):
         logger.info(f"Derivando mensaje de {phone_number} a sesión activa de AGENDA.")
         res = await agenda.procesar_agenda(phone_number, content, history)
         if res is not None:
