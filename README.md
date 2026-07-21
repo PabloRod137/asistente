@@ -274,3 +274,20 @@ Para desplegar Maira para una nueva gestoría, sin tocar código:
 
 ### Base de datos
 - [ ] Confirmar que se arranca con una base de datos limpia (`chatbot.db` nuevo), no la de otro cliente ni la de desarrollo/pruebas.
+
+---
+
+## 👥 CRM y Gestión de Clientes (Fase 3)
+
+Maira incluye un módulo CRM integrado en SQLite para clasificar a los usuarios entre **clientes activos** y **usuarios nuevos**:
+
+### Detección y Tratamiento Diferenciado
+- **Clientes Activos (`tipo_cliente = 'activo'`)**: Si el usuario tiene un expediente asignado, el bot inyecta automáticamente su ficha en el contexto del LLM para saludarle por su nombre y atenderle con el contexto completo de su expediente.
+- **Consultas FAQ y Saludos**: Los saludos ("hola") y preguntas generales de FAQ desde números no registrados se responden con normalidad sin solicitar alta de forma disruptiva.
+- **Flujo de Alta Automático (`alta_cliente.py`)**: Si un usuario nuevo solicita una acción que requiere identificación formal (`AGENDA`, `FACTURA`, `TICKET` o `TRIAJE`), se activa una máquina de estados para solicitar Nombre, NIF/CIF (opcional) y Motivo de consulta. Tras completar el registro, el bot reanuda y procesa la solicitud original.
+- **Sin Repeticiones Molestas**: Si el usuario ya dio sus datos de alta (posee `nombre` registrado en SQLite), no se le vuelve a solicitar el alta en peticiones posteriores aunque su ficha siga en estado `nuevo` a la espera de la revisión del gestor.
+
+### Comandos de Gestor para CRM (`gestor_mode.py`)
+- **`/clientes_nuevos`**: Muestra la lista de clientes registrados en estado `nuevo` pendientes de revisión por el gestor.
+- **`/alta_cliente {telefono} "{expediente}" "{nombre_opcional}"`**: Activa al cliente en el CRM, asignando su número de expediente definitivo y cambiando su estado a `activo`.
+- **`/cliente_info {telefono}`**: Consulta y muestra la ficha completa de un cliente (datos personales, NIF/CIF, expediente, gestor asignado, notas e historial de visitas).
