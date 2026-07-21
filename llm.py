@@ -37,22 +37,29 @@ def generate_response(message: str, history: list, phone_number: str = "web_user
         cliente = client_memory.get_cliente(phone_number)
         if cliente and cliente.get("nombre"):
             nombre = cliente.get("nombre")
+            tipo_cliente = cliente.get("tipo_cliente") or "nuevo"
+            expediente = cliente.get("numero_expediente") or "Pendiente de asignación"
+            nif_cif = cliente.get("nif_cif") or "No registrado"
             empresa = cliente.get("empresa") or "No indicada"
+            email = cliente.get("email") or "No indicado"
             primera_visita = cliente.get("primera_visita") or "No indicada"
             total_conversaciones = cliente.get("total_conversaciones") or 1
             notas = cliente.get("notas") or "Sin notas"
             
             system_content += f"""
 
-=== MEMORIA DEL CLIENTE ===
-Este cliente ya nos ha contactado antes.
+=== FICHA DE CLIENTE RECONOCIDO ===
 Nombre: {nombre}
-Empresa: {empresa}
+Estado CRM: {tipo_cliente}
+Número de Expediente: {expediente}
+NIF/CIF: {nif_cif}
+Empresa/SL: {empresa}
+Email: {email}
 Primera visita: {primera_visita}
 Total conversaciones: {total_conversaciones}
 Notas: {notas}
-
-Si sabes su nombre, úsalo al saludar. Si es su primera visita, no menciones que lo conoces."""
+===========================================
+INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por su nombre y atiende su consulta usando la información de su perfil/expediente si aplica."""
 
     # URL de Gemini REST API
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"

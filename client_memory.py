@@ -14,33 +14,12 @@ def get_cliente(phone_number: str) -> dict | None:
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() == "false":
         return None
 
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT phone_number, nombre, empresa, email, notas, primera_visita, ultima_visita, total_conversaciones
-        FROM clientes WHERE phone_number = ?
-    """, (phone_number,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        return {
-            "phone_number": row[0],
-            "nombre": row[1],
-            "empresa": row[2],
-            "email": row[3],
-            "notas": row[4],
-            "primera_visita": row[5],
-            "ultima_visita": row[6],
-            "total_conversaciones": row[7]
-        }
-    return None
+    return database.get_cliente_by_phone(phone_number)
 
 def registrar_visita(phone_number: str):
     """
     Registra la visita del cliente en base de datos.
-    Si es nuevo lo crea, si ya existe actualiza su última visita e incrementa 
+    Si es nuevo lo crea con tipo_cliente='nuevo', si ya existe actualiza su última visita e incrementa 
     el número total de conversaciones si ha pasado el tiempo límite de inactividad.
     """
     if os.getenv("MODULO_MEMORIA", "true").strip().lower() == "false":
@@ -55,8 +34,8 @@ def registrar_visita(phone_number: str):
     
     if row is None:
         cursor.execute("""
-            INSERT INTO clientes (phone_number, primera_visita, ultima_visita, total_conversaciones)
-            VALUES (?, ?, ?, 1)
+            INSERT INTO clientes (phone_number, tipo_cliente, primera_visita, ultima_visita, total_conversaciones)
+            VALUES (?, 'nuevo', ?, ?, 1)
         """, (phone_number, now_str, now_str))
         logger.info(f"Creado nuevo registro de cliente en memoria para {phone_number}")
     else:
