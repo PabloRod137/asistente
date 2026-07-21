@@ -68,12 +68,15 @@ def procesar_comando(phone_number: str, message: str) -> str:
             "• `/stats` - Estadísticas del negocio este mes.\n"
             "• `/exportar_gastos {cif}` - Exportar gastos de un CIF a Excel en SharePoint.\n"
             "• `/responder_{id} {mensaje}` - Responder a un ticket de escalado.\n\n"
-            "💼 *Comandos de Agenda Interna (Secretaria):*\n"
+            "💼 *Comandos de Agenda Interna y Recordatorios:*\n"
             "• `/agenda` - Tareas, citas y recordatorios de hoy y mañana.\n"
             "• `/agenda_semana` - Agenda de los próximos 7 días.\n"
             "• `/plazos` - Próximos plazos fiscales (30 días).\n"
             "• `/completar {id}` - Completar tarea/cita de la agenda.\n"
-            "• `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha}` - Añadir plazo fiscal."
+            "• `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha} {tel_opcional}` - Añadir plazo fiscal.\n"
+            "• `/documento_pendiente {tel} \"{desc}\" {fecha_limite}` - Dar de alta documento pendiente.\n"
+            "• `/documento_recibido {id}` - Marcar documento pendiente como recibido.\n"
+            "• `/pendientes_documentos` - Listar documentos pendientes de entrega por clientes."
         )
         
     # --- COMANDO: /clientes_hoy ---
@@ -472,32 +475,88 @@ Por favor, sé conciso y estructurado, usa viñetas."""
     # --- COMANDO: /plazo_fiscal ---
     elif cmd == "/plazo_fiscal":
         if not args:
-            return "Uso: `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha}`"
+            return "Uso: `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha} {telefono_opcional}`"
             
         import shlex
         try:
             parts = shlex.split(args)
             if len(parts) < 3:
-                return "Faltan argumentos. Uso: `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha}`"
+                return "Faltan argumentos. Uso: `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha} {telefono_opcional}`"
             modelo = parts[0]
             cliente = parts[1]
             fecha_limite = parts[2]
+            tel_opt = parts[3] if len(parts) > 3 else None
             
             datetime.strptime(fecha_limite, "%Y-%m-%d")
         except Exception as err:
             return f"Error en los parámetros: {err}. Asegúrate de usar comillas si contienen espacios y la fecha en formato YYYY-MM-DD."
             
+        tel_norm = database.normalizar_telefono(tel_opt) if tel_opt else None
         conn = database.get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT INTO plazos_fiscales (modelo, cliente, fecha_limite, completado)
-            VALUES (?, ?, ?, 0)
-        """, (modelo, cliente, fecha_limite))
+            INSERT INTO plazos_fiscales (modelo, cliente, fecha_limite, completado, phone_number, recordatorio_enviado)
+            VALUES (?, ?, ?, 0, ?, 0)
+        """, (modelo, cliente, fecha_limite, tel_norm))
         conn.commit()
         conn.close()
         
-        return f"📅 Plazo fiscal añadido: {modelo} para el cliente '{cliente}' con fecha límite {fecha_limite}."
+        info_tel = f" (Asociado a cliente `{tel_norm}`)" if tel_norm else ""
+        return f"📅 Plazo fiscal añadido: {modelo} para el cliente '{cliente}' con fecha límite {fecha_limite}.{info_tel}"
+
+    # --- COMANDO: /documento_pendiente ---
+    elif cmd == "/documento_pendiente":
+        if not args:
+            return "Uso: `/documento_pendiente {telefono} \"{descripcion}\" {fecha_limite}`"
+        import shlex
+        try:
+            parts = shlex.split(args)
+            if len(parts) < 3:
+                return "Faltan argumentos. Uso: `/documento_pendiente {telefono} \"{descripcion}\" {fecha_limite}`"
+            tel = parts[0]
+            desc = parts[1]
+            fecha_lim = parts[2]
+            datetime.strptime(fecha_lim, "%Y-%m-%d")
+        except Exception as err:
+            return f"Error en los parámetros: {err}. Ejemplo: `/documento_pendiente 34611223344 \"Declaración IRPF 2025\" 2026-07-25`"
+            
+        doc_id = database.save_documento_pendiente(tel, desc, fecha_lim)
+        tel_norm = database.normalizar_telefono(tel)
+        return f"📄 Documento pendiente registrado con éxito (ID: `{doc_id}`) para el cliente `{tel_norm}` con fecha límite {fecha_lim}."
+
+    # --- COMANDO: /documento_recibido ---
+    elif cmd == "/documento_recibido":
+        if not args:
+            return "Uso: `/documento_recibido {id}`"
+        try:
+            doc_id = int(args.strip())
+        except ValueError:
+            return "ID inválido. Debe ser un número."
+            
+        ok = database.marcar_documento_recibido(doc_id)
+        if ok:
+            return f"✅ Documento #{doc_id} marcado como RECIBIDO correctamente."
+        else:
+            return f"❌ No se encontró ningún documento pendiente con ID {doc_id}."
+
+    # --- COMANDO: /pendientes_documentos ---
+    elif cmd == "/pendientes_documentos":
+        docs = database.get_todos_documentos_pendientes()
+        if not docs:
+            return "📄 No hay documentos pendientes de entregar por clientes."
+            
+        res = f"📄 *Documentos Pendientes de Clientes ({len(docs)}):*\n\n"
+        for d in docs:
+            status_tag = "⚠️ VENCIDO" if d["vencido"] else "⏳ Pendiente"
+            nom = d["cliente_nombre"]
+            tel = d["phone_number"]
+            res += (
+                f"• [{status_tag}] *ID {d['id']}*: {d['descripcion']}\n"
+                f"  - Cliente: *{nom}* (`{tel}`)\n"
+                f"  - Límite: {d['fecha_limite']} (Recordado: {d['veces_recordado']} veces)\n"
+            )
+        return res
         
     # --- COMANDO: /responder_{id} {mensaje} ---
     elif cmd.startswith("/responder_"):

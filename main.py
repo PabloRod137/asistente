@@ -85,6 +85,24 @@ def on_startup():
         except Exception as e:
             logger.error(f"Error programando briefing diario: {e}")
 
+    # Programar recordatorios automáticos diarios (documentos y plazos fiscales)
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        from modulos import recordatorios
+        hora_rec_str = os.getenv("RECORDATORIOS_HORA", os.getenv("BRIEFING_HORA", "09:00")).strip()
+        hora_rec = hora_rec_str.split(":")
+        scheduler.add_job(
+            recordatorios.procesar_todos_los_recordatorios,
+            trigger=CronTrigger(hour=int(hora_rec[0]), minute=int(hora_rec[1])),
+            id="recordatorios_diarios",
+            max_instances=1,
+            misfire_grace_time=3600,
+            replace_existing=True
+        )
+        logger.info(f"Programado job diario de recordatorios automáticos a las {hora_rec[0]}:{hora_rec[1]} (max_instances=1, misfire_grace_time=3600).")
+    except Exception as e:
+        logger.error(f"Error programando job diario de recordatorios automáticos: {e}")
+
     # Programar limpieza periódica de archivos temporales de triaje (cada 12 horas)
     try:
         scheduler.add_job(

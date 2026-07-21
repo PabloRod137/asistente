@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("asistente.database")
 
@@ -174,7 +175,35 @@ def init_db():
             descripcion TEXT,
             cliente TEXT,
             fecha_limite DATE NOT NULL,
-            completado INTEGER DEFAULT 0
+            completado INTEGER DEFAULT 0,
+            phone_number TEXT,
+            recordatorio_enviado INTEGER DEFAULT 0
+        )
+    ''')
+
+    # Migraciones para plazos_fiscales
+    columnas_plazos = [
+        ("phone_number", "TEXT"),
+        ("recordatorio_enviado", "INTEGER DEFAULT 0")
+    ]
+    for col_name, col_def in columnas_plazos:
+        try:
+            cursor.execute(f"ALTER TABLE plazos_fiscales ADD COLUMN {col_name} {col_def}")
+        except sqlite3.OperationalError:
+            pass
+
+    # Tabla documentos_pendientes
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS documentos_pendientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            fecha_solicitud DATE NOT NULL,
+            fecha_limite DATE,
+            veces_recordado INTEGER DEFAULT 0,
+            ultimo_recordatorio_fecha DATE,
+            estado TEXT DEFAULT 'pendiente',
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -402,3 +431,149 @@ def activar_cliente(phone_number: str, numero_expediente: str, nombre_opcional: 
     conn.commit()
     conn.close()
     return True
+
+def normalizar_telefono(phone_number: str) -> str:
+    """
+    Normaliza el número de teléfono eliminando espacios, guiones, paréntesis y signos +.
+    Si tiene 9 dígitos (formato español), añade el prefijo '34'.
+    """
+    if not phone_number:
+        return ""
+    clean = "".join([c for c in phone_number if c.isdigit()])
+    if len(clean) == 9 and clean[0] in ['6', '7', '8', '9']:
+        clean = "34" + clean
+    return clean
+
+# Funciones de utilidad para documentos pendientes
+def save_documento_pendiente(phone_number: str, descripcion: str, fecha_limite: str) -> int:
+    phone_norm = normalizar_telefono(phone_number)
+    conn = get_connection()
+    cursor = conn.cursor()
+    hoy_str = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute('''
+        INSERT INTO documentos_pendientes (phone_number, descripcion, fecha_solicitud, fecha_limite, estado)
+        VALUES (?, ?, ?, ?, 'pendiente')
+    ''', (phone_norm, descripcion, hoy_str, fecha_limite))
+    doc_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return doc_id
+
+def marcar_documento_recibido(doc_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE documentos_pendientes SET estado = 'recibido' WHERE id = ?", (doc_id,))
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+def get_documentos_pendientes_a_recordar(dias_antes: int = 3) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, phone_number, descripcion, fecha_solicitud, fecha_limite, veces_recordado, ultimo_recordatorio_fecha
+        FROM documentos_pendientes
+        WHERE estado = 'pendiente'
+          AND fecha_limite IS NOT NULL
+          AND date(fecha_limite) >= date('now', 'start of day')
+          AND date(fecha_limite) <= date('now', 'start of day', '+' || ? || ' days')
+          AND (ultimo_recordatorio_fecha IS NULL OR date(ultimo_recordatorio_fecha) < date('now', 'start of day'))
+    ''', (dias_antes,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "phone_number": row[1],
+            "descripcion": row[2],
+            "fecha_solicitud": row[3],
+            "fecha_limite": row[4],
+            "veces_recordado": row[5],
+            "ultimo_recordatorio_fecha": row[6]
+        }
+        for row in rows
+    ]
+
+def incrementar_recordatorio_documento(doc_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    hoy_str = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute('''
+        UPDATE documentos_pendientes
+        SET veces_recordado = veces_recordado + 1,
+            ultimo_recordatorio_fecha = ?
+        WHERE id = ?
+    ''', (hoy_str, doc_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_todos_documentos_pendientes() -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT d.id, d.phone_number, d.descripcion, d.fecha_solicitud, d.fecha_limite, d.veces_recordado, d.ultimo_recordatorio_fecha, d.estado, c.nombre
+        FROM documentos_pendientes d
+        LEFT JOIN clientes c ON d.phone_number = c.phone_number
+        WHERE d.estado = 'pendiente'
+        ORDER BY d.fecha_limite ASC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    hoy_str = datetime.now().strftime("%Y-%m-%d")
+    
+    result = []
+    for r in rows:
+        fecha_lim = r[4]
+        vencido = False
+        if fecha_lim and fecha_lim < hoy_str:
+            vencido = True
+        result.append({
+            "id": r[0],
+            "phone_number": r[1],
+            "descripcion": r[2],
+            "fecha_solicitud": r[3],
+            "fecha_limite": r[4],
+            "veces_recordado": r[5],
+            "ultimo_recordatorio_fecha": r[6],
+            "estado": r[7],
+            "cliente_nombre": r[8] or r[1],
+            "vencido": vencido
+        })
+    return result
+
+def get_plazos_fiscales_a_recordar_cliente(dias_antes: int = 7) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, modelo, descripcion, cliente, fecha_limite, phone_number
+        FROM plazos_fiscales
+        WHERE completado = 0
+          AND phone_number IS NOT NULL AND phone_number != ''
+          AND recordatorio_enviado = 0
+          AND date(fecha_limite) >= date('now', 'start of day')
+          AND date(fecha_limite) <= date('now', 'start of day', '+' || ? || ' days')
+    ''', (dias_antes,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "modelo": row[1],
+            "descripcion": row[2] or "Sin descripción",
+            "cliente": row[3] or "Cliente",
+            "fecha_limite": row[4],
+            "phone_number": row[5]
+        }
+        for row in rows
+    ]
+
+def marcar_plazo_fiscal_recordado(plazo_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE plazos_fiscales SET recordatorio_enviado = 1 WHERE id = ?", (plazo_id,))
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
