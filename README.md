@@ -291,3 +291,27 @@ Maira incluye un módulo CRM integrado en SQLite para clasificar a los usuarios 
 - **`/clientes_nuevos`**: Muestra la lista de clientes registrados en estado `nuevo` pendientes de revisión por el gestor.
 - **`/alta_cliente {telefono} "{expediente}" "{nombre_opcional}"`**: Activa al cliente en el CRM, asignando su número de expediente definitivo y cambiando su estado a `activo`.
 - **`/cliente_info {telefono}`**: Consulta y muestra la ficha completa de un cliente (datos personales, NIF/CIF, expediente, gestor asignado, notas e historial de visitas).
+
+---
+
+## 🔔 Recordatorios Automáticos Generalizados (Fase 4)
+
+Maira incluye un motor de recordatorios automáticos recurrentes ejecutado mediante `APScheduler` para gestionar dos flujos clave:
+
+### 1. Recordatorios de Documentación Pendiente (`modulos/recordatorios.py`)
+- **Gestión por el Gestor**: El gestor da de alta un documento pendiente para un cliente mediante `/documento_pendiente {telefono} "{descripcion}" {fecha_limite}`.
+- **Recordatorio Diario Automático**: Cada día a la hora configurada (`RECORDATORIOS_HORA`), el bot busca documentos cuya fecha límite esté dentro de `RECORDATORIO_DOCUMENTOS_DIAS_ANTES` (por defecto 3 días) y envía un WhatsApp personalizado al cliente.
+- **Tratamiento de Elementos Vencidos**: Si la fecha límite ya ha pasado, el bot **cancela los avisos automáticos al cliente** y destaca el documento como `⚠️ VENCIDO` en la vista del gestor (`/pendientes_documentos`).
+- **Marca de Recepción**: El gestor marca el documento como entregado con `/documento_recibido {id}` para detener los recordatorios.
+
+### 2. Recordatorios Directos de Plazos Fiscales al Cliente
+- **Asociación de Teléfono**: El comando `/plazo_fiscal "{modelo}" "{cliente}" {fecha_limite} {telefono_opcional}` permite vincular opcionalmente un número de teléfono de cliente.
+- **Aviso Previo al Cliente**: Si un plazo fiscal tiene teléfono asociado y su fecha límite está dentro del margen `RECORDATORIO_FISCAL_DIAS_ANTES` (por defecto 7 días), Maira envía un WhatsApp directo al cliente recordando el modelo fiscal y la fecha límite de presentación.
+- **Control de Duplicados**: Una vez notificado el cliente, el plazo se marca con `recordatorio_enviado = 1` para no repetir la alerta. Si el plazo no incluye teléfono, aparece únicamente en el resumen del gestor.
+
+### Variables de Entorno de Recordatorios
+| Variable | Descripción | Valor por Defecto |
+|---|---|---|
+| `RECORDATORIOS_HORA` | Hora diaria de disparo del job de recordatorios automáticos. | `09:00` |
+| `RECORDATORIO_DOCUMENTOS_DIAS_ANTES` | Días de antelación para notificar al cliente sobre documentos pendientes. | `3` |
+| `RECORDATORIO_FISCAL_DIAS_ANTES` | Días de antelación para notificar al cliente sobre plazos fiscales. | `7` |
