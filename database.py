@@ -116,9 +116,28 @@ def init_db():
             notas TEXT,
             primera_visita DATETIME DEFAULT CURRENT_TIMESTAMP,
             ultima_visita DATETIME DEFAULT CURRENT_TIMESTAMP,
-            total_conversaciones INTEGER DEFAULT 1
+            total_conversaciones INTEGER DEFAULT 1,
+            numero_expediente TEXT,
+            tipo_cliente TEXT DEFAULT 'nuevo',
+            nif_cif TEXT,
+            fecha_alta DATE,
+            gestor_asignado TEXT
         )
     ''')
+
+    # Migraciones para la tabla clientes
+    columnas_clientes = [
+        ("numero_expediente", "TEXT"),
+        ("tipo_cliente", "TEXT DEFAULT 'nuevo'"),
+        ("nif_cif", "TEXT"),
+        ("fecha_alta", "DATE"),
+        ("gestor_asignado", "TEXT")
+    ]
+    for col_name, col_def in columnas_clientes:
+        try:
+            cursor.execute(f"ALTER TABLE clientes ADD COLUMN {col_name} {col_def}")
+        except sqlite3.OperationalError:
+            pass
 
     # Tabla de tickets_escalados
     cursor.execute('''
@@ -303,3 +322,83 @@ def get_gastos_by_cif(cif_emisor: str, limit: int = 1000) -> list:
         }
         for row in rows
     ]
+
+# Funciones de utilidad para clientes (CRM)
+def get_cliente_by_phone(phone_number: str) -> dict | None:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT phone_number, nombre, empresa, email, notas, primera_visita, ultima_visita,
+               total_conversaciones, numero_expediente, tipo_cliente, nif_cif, fecha_alta, gestor_asignado
+        FROM clientes WHERE phone_number = ?
+    ''', (phone_number,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "phone_number": row[0],
+            "nombre": row[1],
+            "empresa": row[2],
+            "email": row[3],
+            "notas": row[4],
+            "primera_visita": row[5],
+            "ultima_visita": row[6],
+            "total_conversaciones": row[7],
+            "numero_expediente": row[8],
+            "tipo_cliente": row[9] or "nuevo",
+            "nif_cif": row[10],
+            "fecha_alta": row[11],
+            "gestor_asignado": row[12]
+        }
+    return None
+
+def get_clientes_nuevos() -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT phone_number, nombre, empresa, email, nif_cif, fecha_alta, primera_visita, ultima_visita
+        FROM clientes
+        WHERE (tipo_cliente IS NULL OR tipo_cliente = 'nuevo') AND (nombre IS NOT NULL AND nombre != '')
+        ORDER BY ultima_visita DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "phone_number": row[0],
+            "nombre": row[1],
+            "empresa": row[2],
+            "email": row[3],
+            "nif_cif": row[4],
+            "fecha_alta": row[5],
+            "primera_visita": row[6],
+            "ultima_visita": row[7]
+        }
+        for row in rows
+    ]
+
+def activar_cliente(phone_number: str, numero_expediente: str, nombre_opcional: str = None, gestor_asignado: str = None) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT nombre FROM clientes WHERE phone_number = ?", (phone_number,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+        
+    current_nombre = row[0]
+    nuevo_nombre = nombre_opcional if nombre_opcional else current_nombre
+    
+    cursor.execute('''
+        UPDATE clientes
+        SET tipo_cliente = 'activo',
+            numero_expediente = ?,
+            nombre = COALESCE(?, nombre),
+            gestor_asignado = COALESCE(?, gestor_asignado)
+        WHERE phone_number = ?
+    ''', (numero_expediente, nuevo_nombre, gestor_asignado, phone_number))
+    
+    conn.commit()
+    conn.close()
+    return True
