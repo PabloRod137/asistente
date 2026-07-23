@@ -237,14 +237,34 @@ Conversaciones ayer: {num_conversaciones}"""
         "contents": [{"parts": [{"text": prompt}]}]
     }
     
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-            response.raise_for_status()
-            briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        logger.error(f"Error generando texto del briefing con Gemini: {e}")
-        briefing = f"Buenos días. Hubo un error al generar tu briefing dinámico de hoy ({hoy}), pero tienes pendientes en tu panel administrativo."
+    briefing = None
+    for intento in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                if response.status_code == 429 and intento < 2:
+                    await asyncio.sleep(2 ** intento)
+                    continue
+                response.raise_for_status()
+                briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                break
+        except Exception as e:
+            if intento < 2:
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"Error generando texto del briefing con Gemini tras reintentos: {e}")
+                
+    if not briefing:
+        # Fallback sin redacción de IA: formatear directamente los datos en crudo para no dejar nunca al gestor sin briefing
+        logger.warning("ACTIVANDO FALLBACK ESTRUCTURADO PARA BRIEFING DIARIO (datos en crudo sin IA).")
+        briefing = (
+            f"☀️ *Briefing Diario de la Gestoría — {hoy}*\n\n"
+            f"🤝 *Citas de hoy:*\n{citas}\n\n"
+            f"📝 *Tareas de hoy:*\n{tareas}\n\n"
+            f"📅 *Plazos fiscales (próximos 7 días):*\n{plazos}\n\n"
+            f"⚠️ *Tickets pendientes:*\n{tickets}\n\n"
+            f"📊 *Conversaciones atendidas ayer:* {num_conversaciones}"
+        )
         
     gestor_whatsapp = os.getenv("GESTOR_WHATSAPP")
     gestor_email = os.getenv("GESTOR_EMAIL") or os.getenv("PROFESIONAL_EMAIL")
@@ -299,6 +319,8 @@ Conversaciones ayer: {num_conversaciones}"""
             logger.info("Briefing enviado con éxito por Email.")
         except Exception as ee:
             logger.error(f"Error enviando briefing por Email: {ee}")
+
+    return briefing
 
 async def parsear_y_guardar_plazos_txt(knowledge_text: str):
     """
