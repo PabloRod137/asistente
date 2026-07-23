@@ -238,16 +238,18 @@ Conversaciones ayer: {num_conversaciones}"""
     }
     
     briefing = None
+    from gemini_limiter import limiter
     for intento in range(3):
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-                if response.status_code == 429 and intento < 2:
-                    await asyncio.sleep(2 ** intento)
-                    continue
-                response.raise_for_status()
-                briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                break
+            async with limiter:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                    if response.status_code == 429 and intento < 2:
+                        await asyncio.sleep(2 ** intento)
+                        continue
+                    response.raise_for_status()
+                    briefing = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    break
         except Exception as e:
             if intento < 2:
                 await asyncio.sleep(1)
@@ -351,12 +353,14 @@ TEXTO:
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
     }
     
+    from gemini_limiter import limiter
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-            response.raise_for_status()
-            res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            plazos = json.loads(res_text)
+        async with limiter:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
+                res_text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                plazos = json.loads(res_text)
             
             conn = database.get_connection()
             cursor = conn.cursor()

@@ -129,12 +129,14 @@ CONVERSACIÓN:
         }]
     }
     
+    from gemini_limiter import limiter
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-            response.raise_for_status()
-            data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+        async with limiter:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
+                data = response.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
         logger.error(f"Error llamando a Gemini para resumen: {e}")
         return f"No se pudo generar el resumen automáticamente debido a un error: {e}"

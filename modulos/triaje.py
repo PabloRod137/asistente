@@ -147,7 +147,9 @@ async def analizar_solicitud_con_ia(datos: dict) -> dict:
             )
             return json.loads(respuesta.text.strip())
 
-        return await asyncio.to_thread(_call_gemini_vision_triaje)
+        from gemini_limiter import limiter
+        async with limiter:
+            return await asyncio.to_thread(_call_gemini_vision_triaje)
     except Exception as e:
         logger.error(f"Error analizando triaje con Gemini: {e}")
         return {

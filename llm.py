@@ -89,12 +89,14 @@ INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por 
     }
 
     if not modo_test:
+        from gemini_limiter import limiter
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-                response.raise_for_status()
-                data = response.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
+            async with limiter:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                    response.raise_for_status()
+                    data = response.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
             logger.error(f"Error conectando con Gemini en llm.py ({phone_number}): {e}")
             if hasattr(e, 'response') and e.response is not None:

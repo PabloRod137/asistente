@@ -66,18 +66,20 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
     }}
     """
     
+    from gemini_limiter import limiter
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
-            }, headers={'Content-Type': 'application/json'})
-            response.raise_for_status()
-            analisis = response.json()
-            datos = json.loads(analisis["candidates"][0]["content"]["parts"][0]["text"].strip())
+        async with limiter:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
+                }, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
+                analisis = response.json()
+                datos = json.loads(analisis["candidates"][0]["content"]["parts"][0]["text"].strip())
     except Exception as e:
         logger.error(f"Error analizando agenda con Gemini: {e}")
-        datos = {"accion": "conversar", "fecha": None, "opcion": None, "servicio": None}
+        return "Lo siento, he tenido un problema técnico al procesar tu solicitud de cita. Por favor, ¿podrías repetírmela en un momento?"
 
     accion = datos.get("accion", "conversar")
     fecha_req = datos.get("fecha")

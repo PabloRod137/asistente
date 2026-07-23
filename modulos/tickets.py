@@ -118,7 +118,9 @@ async def procesar_mensaje_imagen(phone_number: str, temp_image_path: str) -> st
                 )
             )
             
-        respuesta = await asyncio.to_thread(_call_gemini_vision)
+        from gemini_limiter import limiter
+        async with limiter:
+            respuesta = await asyncio.to_thread(_call_gemini_vision)
         datos = json.loads(respuesta.text.strip())
         
         emisor = str(datos.get("emisor", "Desconocido")).strip()

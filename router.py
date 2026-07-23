@@ -62,10 +62,12 @@ async def detectar_intencion(message: str) -> str:
         }
     }
 
+    from gemini_limiter import limiter
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
-            response.raise_for_status()
+        async with limiter:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(url, json=payload, headers={'Content-Type': 'application/json'})
+                response.raise_for_status()
             data = response.json()
             
             parts = data["candidates"][0]["content"].get("parts", [])

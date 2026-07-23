@@ -196,15 +196,17 @@ async def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         }}
         """
         
+        from gemini_limiter import limiter
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
-                }, headers={'Content-Type': 'application/json'})
-                response.raise_for_status()
-                
-                datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
+            async with limiter:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(url, json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
+                    }, headers={'Content-Type': 'application/json'})
+                    response.raise_for_status()
+                    
+                    datos = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
         except Exception as e:
             logger.error(f"Error extrayendo datos de factura con Gemini para {phone_number}: {e}")
             import escalado_humano
