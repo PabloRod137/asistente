@@ -122,7 +122,9 @@ def init_db():
             tipo_cliente TEXT DEFAULT 'nuevo',
             nif_cif TEXT,
             fecha_alta DATE,
-            gestor_asignado TEXT
+            gestor_asignado TEXT,
+            carpeta_sharepoint TEXT,
+            idioma_preferido TEXT DEFAULT 'es'
         )
     ''')
 
@@ -132,7 +134,9 @@ def init_db():
         ("tipo_cliente", "TEXT DEFAULT 'nuevo'"),
         ("nif_cif", "TEXT"),
         ("fecha_alta", "DATE"),
-        ("gestor_asignado", "TEXT")
+        ("gestor_asignado", "TEXT"),
+        ("carpeta_sharepoint", "TEXT"),
+        ("idioma_preferido", "TEXT DEFAULT 'es'")
     ]
     for col_name, col_def in columnas_clientes:
         try:
@@ -369,7 +373,8 @@ def get_cliente_by_phone(phone_number: str) -> dict | None:
     cursor = conn.cursor()
     cursor.execute('''
         SELECT phone_number, nombre, empresa, email, notas, primera_visita, ultima_visita,
-               total_conversaciones, numero_expediente, tipo_cliente, nif_cif, fecha_alta, gestor_asignado
+               total_conversaciones, numero_expediente, tipo_cliente, nif_cif, fecha_alta, gestor_asignado,
+               carpeta_sharepoint, idioma_preferido
         FROM clientes WHERE phone_number = ?
     ''', (phone_number,))
     row = cursor.fetchone()
@@ -388,7 +393,9 @@ def get_cliente_by_phone(phone_number: str) -> dict | None:
             "tipo_cliente": row[9] or "nuevo",
             "nif_cif": row[10],
             "fecha_alta": row[11],
-            "gestor_asignado": row[12]
+            "gestor_asignado": row[12],
+            "carpeta_sharepoint": row[13],
+            "idioma_preferido": row[14] or "es"
         }
     return None
 

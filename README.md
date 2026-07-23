@@ -315,3 +315,47 @@ Maira incluye un motor de recordatorios automáticos recurrentes ejecutado media
 | `RECORDATORIOS_HORA` | Hora diaria de disparo del job de recordatorios automáticos. | `09:00` |
 | `RECORDATORIO_DOCUMENTOS_DIAS_ANTES` | Días de antelación para notificar al cliente sobre documentos pendientes. | `3` |
 | `RECORDATORIO_FISCAL_DIAS_ANTES` | Días de antelación para notificar al cliente sobre plazos fiscales. | `7` |
+
+---
+
+## 📥 Base de Clientes Ampliada e Importador Excel (Fase 6)
+
+Maira incluye un importador masivo en lote de clientes reales desde una plantilla Excel (`plantilla_clientes_maira.xlsx`), facilitando la puesta en marcha inicial del CRM con clientes activos sin requerir altas manuales.
+
+### 1. Nuevos Campos en la Ficha de Clientes
+La tabla `clientes` de SQLite incluye campos extendidos de gestión:
+- `carpeta_sharepoint`: Ruta de almacenamiento asignada al cliente en SharePoint (ej. `/Clientes/Ana Lopez/`).
+- `idioma_preferido`: Idioma de comunicación por defecto (`es`, `en`, etc.), permitiendo la localización del servicio.
+
+### 2. Uso del Importador en Lote
+El proceso de importación se ejecuta desde la consola mediante el script `scripts/importar_clientes.py`:
+```bash
+python scripts/importar_clientes.py {ruta_archivo_excel}
+```
+
+### 3. Características y Robustez del Importador
+- **Mapeo Dinámico por Nombre de Columna**: El importador no depende de la posición fija de las columnas en el Excel. En su lugar, lee la fila 1 (cabeceras) y mapea las columnas según sus nombres normalizados (case-insensitive y sin acentos).
+- **Validación de Datos Obligatorios**: Es obligatorio que existan y estén rellenas las columnas de:
+  - `Nombre completo`
+  - `Teléfono (WhatsApp)`
+  - `NIF/CIF`
+  - `Número de expediente`
+  Si alguna fila de datos tiene un campo obligatorio vacío, se omite y se registra en el informe de errores final, continuando el proceso sin detener la importación del resto.
+- **Evitación de Duplicados (Upsert)**: Si el número de teléfono normalizado ya existe en SQLite, se actualizan todos los datos del cliente (nombre, expediente, empresa, etc.) en lugar de crear un registro duplicado.
+- **Fila de Ejemplo**: El importador detecta y omite automáticamente la fila 2 de la plantilla Excel (fila sombreada e inclinada con datos de ejemplo).
+- **Clientes Activos Directos**: Los clientes importados con éxito se registran directamente con `tipo_cliente = 'activo'`, por lo que Maira los identificará inmediatamente en el chat y les saludará cordialmente por su nombre y contexto de expediente sin requerir completar el flujo de alta.
+
+### 4. Formato de Columnas Requerido en la Plantilla Excel
+La hoja debe llamarse **"Clientes"** y contener las siguientes cabeceras en la primera fila (en cualquier orden):
+- `Nombre completo` *(Obligatorio)*
+- `Teléfono (WhatsApp)` *(Obligatorio)*
+- `NIF/CIF` *(Obligatorio)*
+- `Número de expediente` *(Obligatorio)*
+- `Tipo de cliente` *(Opcional, por defecto 'activo')*
+- `Email` *(Opcional)*
+- `Empresa` *(Opcional)*
+- `Carpeta SharePoint` *(Opcional)*
+- `Gestor asignado` *(Opcional)*
+- `Idioma preferido` *(Opcional, por defecto 'es')*
+- `Fecha de alta` *(Opcional, formato YYYY-MM-DD o DD/MM/YYYY)*
+- `Notas` *(Opcional)*

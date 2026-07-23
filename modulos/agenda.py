@@ -34,7 +34,7 @@ async def procesar_agenda(phone_number: str, message: str, history: list) -> str
     if not api_key:
         return "Lo siento, la agenda no está disponible porque el servicio de IA no está configurado."
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
     contexto = []
     for msg in history[-4:]:

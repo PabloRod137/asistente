@@ -64,7 +64,7 @@ INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por 
     modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
     
     # URL de Gemini REST API
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
     # Construir historial en el formato esperado por Gemini API
     contents = []

@@ -194,10 +194,14 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
             logger.info(f"Cliente {phone_number} solicita {intent} sin estar registrado. Activando alta_cliente...")
             return alta_cliente.iniciar_alta(phone_number, intent, content)
 
+    res_agenda = None
     if intent == "AGENDA":
-        return await agenda.procesar_agenda(phone_number, content, history)
+        res_agenda = await agenda.procesar_agenda(phone_number, content, history)
+        if res_agenda is not None:
+            return res_agenda
+        intent = "CHAT"
         
-    elif intent == "TICKET":
+    if intent == "TICKET":
         return "Para registrar un ticket de gasto, por favor envíame directamente la foto del ticket."
         
     elif intent == "FACTURA":

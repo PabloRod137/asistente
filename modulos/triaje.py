@@ -139,7 +139,7 @@ async def analizar_solicitud_con_ia(datos: dict) -> dict:
             contents.append(prompt)
             
             respuesta = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.0-flash',
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
