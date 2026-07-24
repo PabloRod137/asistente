@@ -13,9 +13,9 @@ def get_system_prompt() -> str:
         logger.warning("No se encontró system_prompt.txt. Usando fallback genérico.")
         return "Eres un asistente comercial amable. Ayuda al cliente en español."
 
-async def generate_response(message: str, history: list, phone_number: str = "web_user") -> str:
+async def generate_response(message: str, history: list, phone_number: str = "web_user", contexto_adicional: str = None, raise_on_error: bool = False) -> str:
     """
-    Genera la respuesta conversacional usando la API de Gemini 2.5 Flash de forma asíncrona.
+    Genera la respuesta conversacional usando la API de Gemini 2.0 Flash de forma asíncrona.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -61,6 +61,9 @@ Notas: {notas}
 ===========================================
 INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por su nombre y atiende su consulta usando la información de su perfil/expediente si aplica."""
 
+    if contexto_adicional:
+        system_content += "\n\n=== CONTEXTO ADICIONAL DE LA CONSULTA ===\n" + contexto_adicional
+
     modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
     
     # URL de Gemini REST API
@@ -101,6 +104,8 @@ INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por 
             logger.error(f"Error conectando con Gemini en llm.py ({phone_number}): {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Detalles: {e.response.text}")
+            if raise_on_error:
+                raise e
 
     # Fallback simulado de IA (usado en MODO_TEST o cuando la API key de Gemini esté agotada/restringida)
     import client_memory

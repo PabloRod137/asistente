@@ -10,7 +10,7 @@ class GeminiRateLimiter:
     Garantiza que las llamadas se serialicen (Semáforo = 1) y mantengan un espaciado mínimo
     entre ejecuciones para evitar picos de RPM en el tier gratuito de Google AI Studio.
     """
-    def __init__(self, delay_seconds=2.0):
+    def __init__(self, delay_seconds=4.2):
         self.semaphore = asyncio.Semaphore(1)
         self.last_call_time = 0.0
         self.delay_seconds = delay_seconds
@@ -29,4 +29,4 @@ class GeminiRateLimiter:
         self.semaphore.release()
 
 # Instancia global compartida para todo el bot Maira
-limiter = GeminiRateLimiter(delay_seconds=2.0)
+limiter = GeminiRateLimiter(delay_seconds=4.2)

@@ -35,15 +35,14 @@ async def procesar_comando(phone_number: str, message: str) -> str:
             logger.error(f"Error escribiendo en knowledge.txt: {e}")
             return "Error al actualizar la base de conocimiento ❌"
             
-    try:
-        import secretaria
-        datos_accion = await secretaria.interpretar_mensaje_interno(message)
-        if datos_accion is not None:
-            return secretaria.ejecutar_accion_interno(datos_accion)
-    except Exception as se:
-        logger.error(f"Error procesando lenguaje natural con modulo secretaria: {se}")
-
     if not msg_strip.startswith("/"):
+        try:
+            import secretaria
+            datos_accion = await secretaria.interpretar_mensaje_interno(message)
+            if datos_accion is not None:
+                return secretaria.ejecutar_accion_interno(datos_accion)
+        except Exception as se:
+            logger.error(f"Error procesando lenguaje natural con modulo secretaria: {se}")
         return None
         
     cmd_parts = msg_strip.split(maxsplit=1)
@@ -63,6 +62,11 @@ async def procesar_comando(phone_number: str, message: str) -> str:
             "• `/stats` - Estadísticas del negocio este mes.\n"
             "• `/exportar_gastos {cif}` - Exportar gastos de un CIF a Excel en SharePoint.\n"
             "• `/responder_{id} {mensaje}` - Responder a un ticket de escalado.\n\n"
+            "📂 *Comandos de Expedientes (Fase 7):*\n"
+            "• `/expediente_nuevo {tel} \"{tipo}\" \"{titulo}\"` - Crear un expediente.\n"
+            "• `/expediente_estado {id} {estado}` - Cambiar estado (recibido, en_gestion, resuelto).\n"
+            "• `/expedientes_abiertos` - Listar todos los expedientes abiertos por gestor.\n"
+            "• `/mis_expedientes {gestor}` - Filtrar expedientes por gestor.\n\n"
             "💼 *Comandos de Agenda Interna y Recordatorios:*\n"
             "• `/agenda` - Tareas, citas y recordatorios de hoy y mañana.\n"
             "• `/agenda_semana` - Agenda de los próximos 7 días.\n"
@@ -548,6 +552,99 @@ Por favor, sé conciso y estructurado, usa viñetas."""
             return f"Mensaje enviado con éxito al cliente {client_phone} ✅"
         else:
             return f"No se pudo enviar el mensaje por WhatsApp al cliente {client_phone} ❌"
+    elif cmd == "/expediente_nuevo":
+        import re
+        match = re.match(r'^(\d+)\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?$', args.strip())
+        if not match:
+            return "Formato inválido. Usa `/expediente_nuevo {tel} \"{tipo}\" \"{titulo}\"`."
+        
+        tel = match.group(1).strip()
+        tipo = match.group(2).strip().lower()
+        titulo = match.group(3).strip()
+        
+        valid_tipos = {"fiscal", "laboral", "mercantil", "civil", "compliance", "general"}
+        if tipo not in valid_tipos:
+            return f"❌ Tipo de expediente inválido. Debe ser uno de: {', '.join(valid_tipos)}."
             
+        cli = database.get_cliente_by_phone(tel)
+        if not cli:
+            return f"❌ El cliente con teléfono {tel} no existe en el CRM. Por favor, regístralo primero."
+            
+        gestor = cli.get("gestor_asignado")
+        sp_path = cli.get("carpeta_sharepoint")
+        
+        new_id = database.crear_expediente(tel, tipo, titulo, gestor_asignado=gestor, ruta_sharepoint=sp_path)
+        return f"✅ Expediente #{new_id} ({titulo}) creado con éxito para el cliente {tel} (Gestor asignado: {gestor or 'Sin asignar'})."
+
+    elif cmd == "/expediente_estado":
+        import re
+        match = re.match(r'^(\d+)\s+(\w+)$', args.strip())
+        if not match:
+            return "Formato inválido. Usa `/expediente_estado {id} {estado}`."
+            
+        exp_id = int(match.group(1))
+        estado = match.group(2).strip().lower()
+        
+        valid_estados = {"recibido", "en_gestion", "resuelto"}
+        if estado not in valid_estados:
+            return f"❌ Estado inválido. Debe ser uno de: {', '.join(valid_estados)}."
+            
+        if database.actualizar_estado_expediente(exp_id, estado):
+            return f"✅ Estado del expediente #{exp_id} actualizado a '{estado}' con éxito."
+        else:
+            return f"❌ No se encontró ningún expediente con ID {exp_id}."
+
+    elif cmd == "/expedientes_abiertos":
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, phone_number, tipo, titulo, estado, gestor_asignado
+            FROM expedientes WHERE estado != 'resuelto'
+            ORDER BY COALESCE(gestor_asignado, ''), creado_en DESC
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return "📂 No hay expedientes abiertos en el sistema."
+            
+        por_gestor = {}
+        for r in rows:
+            gestor = r[5] or "Sin asignar"
+            if gestor not in por_gestor:
+                por_gestor[gestor] = []
+            por_gestor[gestor].append(r)
+            
+        res = "📂 *Listado de Expedientes Abiertos:*\n"
+        for gestor, exps in por_gestor.items():
+            res += f"\n*Gestor: {gestor}*\n"
+            for e in exps:
+                res += f"  - *ID {e[0]}* [{e[2].capitalize()}]: {e[3]} (Cliente: `{e[1]}`, Estado: *{e[4]}*)\n"
+        return res
+
+    elif cmd == "/mis_expedientes":
+        gestor_name = args.strip()
+        if not gestor_name:
+            return "Por favor, especifica el nombre del gestor: `/mis_expedientes {gestor}`."
+            
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, phone_number, tipo, titulo, estado, creado_en
+            FROM expedientes
+            WHERE gestor_asignado LIKE ?
+            ORDER BY creado_en DESC
+        ''', (f"%{gestor_name}%",))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return f"📂 No hay expedientes asignados al gestor '{gestor_name}'."
+            
+        res = f"📂 *Expedientes asignados a {gestor_name} ({len(rows)}):*\n\n"
+        for e in rows:
+            res += f"• *ID {e[0]}* [{e[2].capitalize()}]: {e[3]} (Cliente: `{e[1]}`, Estado: *{e[4]}*)\n"
+        return res
+
     else:
         return f"Comando no reconocido. Escribe `/ayuda` para ver la lista de comandos."

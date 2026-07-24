@@ -28,6 +28,9 @@ async def detectar_intencion(message: str) -> str:
             if os.getenv("MODULO_TRIAJE", "true").strip().lower() != "false":
                 logger.info("Heurística de intención detectada: TRIAJE")
                 return "TRIAJE"
+        if "expediente" in msg_lower or "tramite" in msg_lower or "trámite" in msg_lower or "mi caso" in msg_lower or "novedades" in msg_lower:
+            logger.info("Heurística de intención detectada: EXPEDIENTE")
+            return "EXPEDIENTE"
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -46,9 +49,10 @@ async def detectar_intencion(message: str) -> str:
     - TICKET: Indica que está enviando un ticket, factura de gasto recibida, recibo, o que quiere registrar un gasto (ej: "te paso el ticket", "aquí tienes la factura").
     - FACTURA: Quiere crear, emitir o generar una factura para cobrar a un cliente (ej: "factura a Juan García", "hazme una factura por...").
     - TRIAJE: Solicita un presupuesto, reporta una avería o un trabajo para realizar (ej: "tengo una gotera", "presupuesto para pintar").
+    - EXPEDIENTE: Pregunta por el estado, avance, progreso o novedades de su expediente, trámite o caso (ej: "¿cómo va lo mío?", "¿hay novedades de mi expediente?").
     - CHAT: Conversación general, saludos, preguntas sobre el negocio, precios, horarios, etc.
 
-    Regla: Responde ÚNICAMENTE con la palabra de la categoría (AGENDA, TICKET, FACTURA, TRIAJE, CHAT). Nada más.
+    Regla: Responde ÚNICAMENTE con la palabra de la categoría (AGENDA, TICKET, FACTURA, TRIAJE, EXPEDIENTE, CHAT). Nada más.
     Mensaje: "{message}"
     """
 
@@ -77,7 +81,7 @@ async def detectar_intencion(message: str) -> str:
                 return "CHAT"
             intent = text_parts[-1].strip().upper()
             
-            valid_intents = {"AGENDA", "TICKET", "FACTURA", "TRIAJE", "CHAT"}
+            valid_intents = {"AGENDA", "TICKET", "FACTURA", "TRIAJE", "EXPEDIENTE", "CHAT"}
             matched_intent = "CHAT"
             for i in valid_intents:
                 if i in intent:

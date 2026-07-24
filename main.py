@@ -187,7 +187,7 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
 
     intent = await router.detectar_intencion(content)
     
-    intenciones_requieren_identificacion = ["AGENDA", "FACTURA", "TICKET", "TRIAJE"]
+    intenciones_requieren_identificacion = ["AGENDA", "FACTURA", "TICKET", "TRIAJE", "EXPEDIENTE"]
     if intent in intenciones_requieren_identificacion:
         cliente_info = client_memory.get_cliente(phone_number)
         if not cliente_info or not cliente_info.get("nombre"):
@@ -210,6 +210,33 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
     elif intent == "TRIAJE":
         return await triaje.gestionar_triaje(phone_number, content, msg_type)
         
+    elif intent == "EXPEDIENTE":
+        expedientes = database.get_expedientes_by_phone(phone_number)
+        if not expedientes:
+            contexto_adicional = "El cliente ha solicitado el estado de sus trámites o expediente, pero la base de datos muestra que no tiene ningún expediente registrado a su nombre. Explícale esto de forma amable en tu tono comercial."
+            try:
+                return await llm.generate_response(content, history, phone_number, contexto_adicional=contexto_adicional, raise_on_error=True)
+            except Exception as e:
+                logger.error(f"Error generando respuesta de expediente vacío con Gemini: {e}")
+                return "Actualmente no consta ningún trámite o expediente abierto a tu nombre en nuestro sistema. Si crees que se trata de un error, por favor ponte en contacto con nosotros."
+        else:
+            lista_str = "\n".join([f"• {exp['titulo']} — {exp['estado'].replace('_', ' ').capitalize()}" for exp in expedientes])
+            contexto_adicional = f"""El cliente ha solicitado el estado de sus trámites o expedientes.
+Aquí tienes la lista real de sus expedientes registrada en SQLite:
+{lista_str}
+
+Instrucción: Genera una respuesta amigable en tu tono comercial informándole detalladamente del estado de cada expediente listado.
+"""
+            try:
+                return await llm.generate_response(content, history, phone_number, contexto_adicional=contexto_adicional, raise_on_error=True)
+            except Exception as e:
+                logger.error(f"Error generando respuesta de expediente con Gemini (activando fallback estructurado): {e}")
+                return f"""Estos son los trámites que tenemos abiertos a tu nombre:
+
+{lista_str}
+
+(Disculpa, ahora mismo no puedo darte más detalle, pero estos son los datos que tenemos)"""
+
     elif intent == "COBRADOR":
         return await llm.generate_response(content, history, phone_number)
         
@@ -263,7 +290,7 @@ async def receive_message(request: Request):
                             await whatsapp.send_whatsapp_message(phone_number, ai_response)
                             
                             if escalado_humano.detectar_necesidad_escalado(ai_response):
-                                escalado_humano.crear_ticket_escalado(phone_number, content, ai_response)
+                                await escalado_humano.crear_ticket_escalado(phone_number, content, ai_response)
                             
                             if conversation_summary.detectar_despedida(content):
                                 await conversation_summary.generar_y_enviar_resumen(phone_number)
@@ -293,7 +320,7 @@ async def chat_web(data: dict):
     database.save_message(phone_number, "assistant", ai_response)
     
     if escalado_humano.detectar_necesidad_escalado(ai_response):
-        escalado_humano.crear_ticket_escalado(phone_number, mensaje, ai_response)
+        await escalado_humano.crear_ticket_escalado(phone_number, mensaje, ai_response)
         
     if conversation_summary.detectar_despedida(mensaje):
         await conversation_summary.generar_y_enviar_resumen(phone_number)

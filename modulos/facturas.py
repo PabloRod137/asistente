@@ -210,7 +210,7 @@ async def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         except Exception as e:
             logger.error(f"Error extrayendo datos de factura con Gemini para {phone_number}: {e}")
             import escalado_humano
-            ticket_id = escalado_humano.crear_ticket_escalado(
+            ticket_id = await escalado_humano.crear_ticket_escalado(
                 phone_number=phone_number,
                 mensaje_cliente=message,
                 respuesta_maira="[Facturación]: Fallo al extraer datos fiscales con Gemini."
@@ -240,7 +240,7 @@ async def procesar_solicitud_factura(phone_number: str, message: str) -> str:
     if not destinatario or not cif_valido or not concepto or base <= 0.0 or base > limite_maximo:
         logger.warning(f"Validación defensiva fallida para {phone_number}. Datos interpretados: {datos}")
         import escalado_humano
-        ticket_id = escalado_humano.crear_ticket_escalado(
+        ticket_id = await escalado_humano.crear_ticket_escalado(
             phone_number=phone_number,
             mensaje_cliente=message,
             respuesta_maira=f"[Facturación]: Datos inválidos detectados (CIF válido: {cif_valido}, Importe: {base} EUR)."

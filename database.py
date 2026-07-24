@@ -238,6 +238,21 @@ def init_db():
             PRIMARY KEY (phone_number, tipo_sesion)
         )
     ''')
+
+    # Tabla expedientes (Fase 7.1)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS expedientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            tipo TEXT NOT NULL,              -- 'fiscal' | 'laboral' | 'mercantil' | 'civil' | 'compliance' | 'general'
+            titulo TEXT NOT NULL,
+            estado TEXT DEFAULT 'recibido',  -- 'recibido' | 'en_gestion' | 'resuelto'
+            gestor_asignado TEXT,
+            ruta_sharepoint TEXT,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     
     conn.commit()
     
@@ -659,4 +674,85 @@ def clear_expired_sessions(tipo_sesion: str = None, timeout_seconds: int = 900):
     if count > 0:
         logger.info(f"Purga de sesiones expiradas: eliminadas {count} sesión(es) antiguas.")
     return count
+
+# --- Funciones de Gestión de Expedientes (Fase 7) ---
+def crear_expediente(phone_number: str, tipo: str, titulo: str, gestor_asignado: str = None, ruta_sharepoint: str = None) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO expedientes (phone_number, tipo, titulo, estado, gestor_asignado, ruta_sharepoint, creado_en, actualizado_en)
+        VALUES (?, ?, ?, 'recibido', ?, ?, ?, ?)
+    ''', (phone_number, tipo, titulo, gestor_asignado, ruta_sharepoint, now_str, now_str))
+    new_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"Expediente #{new_id} ({titulo}) creado para {phone_number}.")
+    return new_id
+
+def get_expedientes_by_phone(phone_number: str) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, phone_number, tipo, titulo, estado, gestor_asignado, ruta_sharepoint, creado_en, actualizado_en
+        FROM expedientes WHERE phone_number = ?
+        ORDER BY creado_en DESC
+    ''', (phone_number,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "phone_number": row[1],
+            "tipo": row[2],
+            "titulo": row[3],
+            "estado": row[4],
+            "gestor_asignado": row[5],
+            "ruta_sharepoint": row[6],
+            "creado_en": row[7],
+            "actualizado_en": row[8]
+        }
+        for row in rows
+    ]
+
+def actualizar_estado_expediente(expediente_id: int, nuevo_estado: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        UPDATE expedientes
+        SET estado = ?, actualizado_en = ?
+        WHERE id = ?
+    ''', (nuevo_estado, now_str, expediente_id))
+    rows_affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    if rows_affected > 0:
+        logger.info(f"Estado del expediente #{expediente_id} actualizado a '{nuevo_estado}'.")
+        return True
+    return False
+
+def get_expediente_by_id(expediente_id: int) -> dict | None:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, phone_number, tipo, titulo, estado, gestor_asignado, ruta_sharepoint, creado_en, actualizado_en
+        FROM expedientes WHERE id = ?
+    ''', (expediente_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "id": row[0],
+            "phone_number": row[1],
+            "tipo": row[2],
+            "titulo": row[3],
+            "estado": row[4],
+            "gestor_asignado": row[5],
+            "ruta_sharepoint": row[6],
+            "creado_en": row[7],
+            "actualizado_en": row[8]
+        }
+    return None
+
 
