@@ -253,7 +253,47 @@ def init_db():
             actualizado_en DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
+
+    # Tabla clientes_importados_pendientes (Fase 9.1 - clientes reales importados sin teléfono,
+    # a la espera de que escriban a Maira alguna vez para completarse solos)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clientes_importados_pendientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            nif_cif TEXT,
+            numero_expediente TEXT,
+            notas TEXT,
+            carpeta_sharepoint TEXT,
+            tipo_cliente TEXT DEFAULT 'activo',
+            idioma_preferido TEXT DEFAULT 'es',
+            promovido INTEGER DEFAULT 0,
+            telefono_asignado TEXT,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            promovido_en DATETIME
+        )
+    ''')
+
+    # Tabla capturas_estructuradas (Fase 8.1 - captura estructurada universal de Maira)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS capturas_estructuradas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            canal TEXT NOT NULL,             -- 'whatsapp_texto' | 'whatsapp_audio' | 'chat_web'
+            cliente_probable TEXT,
+            area_probable TEXT,
+            asunto TEXT,
+            urgencia TEXT,
+            solicitud TEXT,
+            documentos_mencionados TEXT,
+            servicio_sugerido TEXT,
+            expediente_probable TEXT,
+            confianza INTEGER,
+            mensaje_original TEXT,
+            revisado INTEGER DEFAULT 0,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     
     # Ejecutar la migración de autoincrement sobre la tabla facturas si fuese necesario
@@ -268,6 +308,27 @@ def save_message(phone_number: str, role: str, content: str):
         INSERT INTO messages (phone_number, role, content)
         VALUES (?, ?, ?)
     ''', (phone_number, role, content))
+    conn.commit()
+    conn.close()
+
+def actualizar_ultimo_mensaje_usuario(phone_number: str, nuevo_contenido: str):
+    """
+    Sustituye el contenido del último mensaje 'user' guardado para este teléfono. Se usa tras
+    transcribir una nota de voz: al llegar el audio se guarda un placeholder tipo
+    '[Envía Nota de Voz]' (no se conoce el texto todavía), y en cuanto se obtiene la
+    transcripción real se reemplaza aquí — así el historial de conversación conserva el
+    contenido real para turnos futuros en vez del placeholder.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE messages SET content = ?
+        WHERE id = (
+            SELECT id FROM messages
+            WHERE phone_number = ? AND role = 'user'
+            ORDER BY id DESC LIMIT 1
+        )
+    ''', (nuevo_contenido, phone_number))
     conn.commit()
     conn.close()
 
@@ -476,6 +537,128 @@ def normalizar_telefono(phone_number: str) -> str:
     if len(clean) == 9 and clean[0] in ['6', '7', '8', '9']:
         clean = "34" + clean
     return clean
+
+# Funciones de utilidad para clientes importados sin teléfono (Fase 9.1)
+def insertar_cliente_pendiente(nombre: str, nif_cif: str = None, numero_expediente: str = None,
+                                notas: str = None, carpeta_sharepoint: str = None,
+                                tipo_cliente: str = "activo", idioma_preferido: str = "es") -> int:
+    """
+    Crea (o actualiza si ya existía sin promover) un cliente en la lista de espera. Es idempotente
+    por nombre: reejecutar la importación con el mismo Excel (o una versión actualizada) no
+    duplica filas — actualiza la existente. Sin esto, dos ejecuciones dejarían dos pendientes con
+    el mismo nombre, y client_matching.buscar_coincidencia los trataría como un empate ambiguo,
+    dejando de proponer la vinculación automática para ese cliente.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id FROM clientes_importados_pendientes WHERE promovido = 0 AND nombre = ?
+    ''', (nombre,))
+    existente = cursor.fetchone()
+
+    if existente:
+        pendiente_id = existente[0]
+        cursor.execute('''
+            UPDATE clientes_importados_pendientes
+            SET nif_cif = ?, numero_expediente = ?, notas = ?, carpeta_sharepoint = ?,
+                tipo_cliente = ?, idioma_preferido = ?
+            WHERE id = ?
+        ''', (nif_cif, numero_expediente, notas, carpeta_sharepoint, tipo_cliente, idioma_preferido, pendiente_id))
+    else:
+        cursor.execute('''
+            INSERT INTO clientes_importados_pendientes
+                (nombre, nif_cif, numero_expediente, notas, carpeta_sharepoint, tipo_cliente, idioma_preferido)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (nombre, nif_cif, numero_expediente, notas, carpeta_sharepoint, tipo_cliente, idioma_preferido))
+        pendiente_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+    return pendiente_id
+
+def listar_clientes_pendientes(solo_no_promovidos: bool = True) -> list:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if solo_no_promovidos:
+        cursor.execute('SELECT * FROM clientes_importados_pendientes WHERE promovido = 0')
+    else:
+        cursor.execute('SELECT * FROM clientes_importados_pendientes')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def promover_cliente_pendiente(pendiente_id: int, phone_number: str) -> dict | None:
+    """
+    Traslada un cliente de la lista de espera a la tabla real 'clientes', ya con el teléfono
+    que se acaba de confirmar por WhatsApp, y marca el registro de espera como promovido
+    (se conserva para auditoría, no se borra). Devuelve la ficha final del cliente o None si
+    el pendiente_id no existe o ya estaba promovido.
+
+    La "reclamación" del pendiente (el UPDATE con WHERE promovido = 0) se hace ANTES de tocar
+    la tabla clientes y sin commit intermedio, para que sea atómica: si dos peticiones casi
+    simultáneas intentan promover el mismo pendiente_id, SQLite serializa la escritura y solo
+    una de ellas verá rowcount = 1 — la otra ve 0 y aborta sin crear un cliente duplicado.
+    """
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT * FROM clientes_importados_pendientes WHERE id = ?', (pendiente_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    pendiente = dict(row)
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fecha_alta = datetime.now().strftime("%Y-%m-%d")
+
+    cursor.execute('''
+        UPDATE clientes_importados_pendientes
+        SET promovido = 1, telefono_asignado = ?, promovido_en = ?
+        WHERE id = ? AND promovido = 0
+    ''', (phone_number, now_str, pendiente_id))
+
+    if cursor.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        logger.warning(f"Cliente pendiente #{pendiente_id} ya había sido promovido por otra petición concurrente.")
+        return None
+
+    cursor.execute('SELECT phone_number FROM clientes WHERE phone_number = ?', (phone_number,))
+    ya_existe = cursor.fetchone() is not None
+
+    if ya_existe:
+        cursor.execute('''
+            UPDATE clientes SET
+                nombre = ?, nif_cif = ?, numero_expediente = ?, notas = ?, carpeta_sharepoint = ?,
+                tipo_cliente = ?, idioma_preferido = ?, fecha_alta = ?, ultima_visita = ?
+            WHERE phone_number = ?
+        ''', (
+            pendiente["nombre"], pendiente["nif_cif"], pendiente["numero_expediente"], pendiente["notas"],
+            pendiente["carpeta_sharepoint"], pendiente["tipo_cliente"], pendiente["idioma_preferido"],
+            fecha_alta, now_str, phone_number
+        ))
+    else:
+        cursor.execute('''
+            INSERT INTO clientes (
+                phone_number, nombre, nif_cif, numero_expediente, notas, carpeta_sharepoint,
+                tipo_cliente, idioma_preferido, fecha_alta, primera_visita, ultima_visita, total_conversaciones
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ''', (
+            phone_number, pendiente["nombre"], pendiente["nif_cif"], pendiente["numero_expediente"],
+            pendiente["notas"], pendiente["carpeta_sharepoint"], pendiente["tipo_cliente"],
+            pendiente["idioma_preferido"], fecha_alta, now_str, now_str
+        ))
+
+    conn.commit()
+
+    cursor.execute('SELECT * FROM clientes WHERE phone_number = ?', (phone_number,))
+    resultado = cursor.fetchone()
+    conn.close()
+    logger.info(f"Cliente pendiente #{pendiente_id} ({pendiente['nombre']}) promovido con teléfono {phone_number}.")
+    return dict(resultado) if resultado else None
 
 # Funciones de utilidad para documentos pendientes
 def save_documento_pendiente(phone_number: str, descripcion: str, fecha_limite: str) -> int:
@@ -754,5 +937,64 @@ def get_expediente_by_id(expediente_id: int) -> dict | None:
             "actualizado_en": row[8]
         }
     return None
+
+
+def guardar_captura_estructurada(phone_number: str, canal: str, mensaje_original: str, datos: dict) -> int:
+    """
+    Persiste el resultado de la captura estructurada (Fase 8.1) generada por Gemini a partir
+    de un mensaje entrante (texto o transcripción de audio), en el formato pedido por el cliente:
+    cliente probable, área probable, asunto, urgencia, solicitud, documentos mencionados,
+    servicio sugerido, expediente probable y confianza.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO capturas_estructuradas (
+            phone_number, canal, cliente_probable, area_probable, asunto, urgencia,
+            solicitud, documentos_mencionados, servicio_sugerido, expediente_probable,
+            confianza, mensaje_original
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        phone_number, canal,
+        datos.get("cliente_probable"), datos.get("area_probable"), datos.get("asunto"),
+        datos.get("urgencia"), datos.get("solicitud"), datos.get("documentos_mencionados"),
+        datos.get("servicio_sugerido"), datos.get("expediente_probable"),
+        datos.get("confianza"), mensaje_original
+    ))
+    new_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"Captura estructurada #{new_id} guardada para {phone_number} (canal={canal}).")
+    return new_id
+
+def get_capturas_pendientes(limit: int = 10) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, phone_number, canal, cliente_probable, area_probable, asunto, urgencia,
+               solicitud, documentos_mencionados, servicio_sugerido, expediente_probable,
+               confianza, creado_en
+        FROM capturas_estructuradas
+        WHERE revisado = 0
+        ORDER BY creado_en DESC
+        LIMIT ?
+    ''', (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    columnas = [
+        "id", "phone_number", "canal", "cliente_probable", "area_probable", "asunto",
+        "urgencia", "solicitud", "documentos_mencionados", "servicio_sugerido",
+        "expediente_probable", "confianza", "creado_en"
+    ]
+    return [dict(zip(columnas, row)) for row in rows]
+
+def marcar_captura_revisada(captura_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE capturas_estructuradas SET revisado = 1 WHERE id = ?", (captura_id,))
+    rows_affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return rows_affected > 0
 
 

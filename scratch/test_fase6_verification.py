@@ -41,18 +41,22 @@ def crear_excel_test_normal(filename="test_normal.xlsx"):
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
         
-    # Fila 2: Ejemplo (omitida)
-    ws.append(["Ejemplo Nombre", "34600000000", "00000000T", "EXP-EX", "activo", "ex@mail.com", "Emp", "/path/", "Gestor", "es", "2026-01-01", "Notas"])
-    
+    # Fila 2: Ejemplo real de la plantilla (se detecta por contenido, no por posición, y se omite)
+    ws.append(["Ana López García", "34600112233", "12345678A", "EXP-2026-001", "activo", "ex@mail.com", "Emp", "/path/", "Gestor", "es", "2026-01-01", "Notas"])
+
     # Fila 3: Válido 1
     ws.append(["Juan Pérez", "34600000001", "11111111A", "EXP-001", "activo", "juan@mail.com", "Pérez S.L.", "/SP/Juan", "Alberto", "es", "2026-02-01", "Notas Juan"])
-    
-    # Fila 4: Inválido (NIF vacío)
+
+    # Fila 4: NIF vacío, pero SÍ tiene teléfono -> debe importarse igualmente (NIF ya no es obligatorio)
     ws.append(["Pedro Gómez", "34600000002", "", "EXP-002", "activo", "pedro@mail.com", "Gomez S.L.", "", "", "es", "", ""])
-    
+
     # Fila 5: Upsert sobre Válido 1 (Mismo teléfono, nombre modificado)
     ws.append(["Juan Pérez Modificado", "34600000001", "11111111A", "EXP-001-MOD", "activo", "juan@mail.com", "Pérez S.L.", "/SP/Juan", "Alberto", "es", "2026-02-01", "Notas Actualizadas"])
-    
+
+    # Fila 6: Sin teléfono y SIN número de expediente directo -> debe ir a la lista de espera,
+    # con el expediente extraído automáticamente de la ruta de SharePoint (2024-010)
+    ws.append(["Marta Sin Telefono", "", "33333333C", "", "activo", "", "", "/Documentos compartidos/2024-010 - Autonomo - MARTA SIN TELEFONO/00_FACTURAS/", "", "es", "", ""])
+
     wb.save(filename)
     logger.info(f"✅ Excel de test normal '{filename}' generado.")
 
@@ -69,8 +73,8 @@ def crear_excel_test_reordenado(filename="test_reordenado.xlsx"):
     for col, h in enumerate(headers_reordered, 1):
         ws.cell(row=1, column=col, value=h)
         
-    # Fila 2: Ejemplo (omitida)
-    ws.append(["00000000T", "EXP-EX", "34600000000", "Ejemplo Nombre", "/path/", "es", "2026-01-01"])
+    # Fila 2: Ejemplo real de la plantilla, reordenado (se detecta por contenido y se omite)
+    ws.append(["12345678A", "EXP-2026-001", "34600112233", "Ana López García", "/path/", "es", "2026-01-01"])
     
     # Fila 3: Válido Reordenado
     ws.append(["22222222B", "EXP-003", "34600000003", "María López", "/SP/Maria", "en", "2026-03-01"])
@@ -114,10 +118,14 @@ async def main_test():
     import database
     from scripts import importar_clientes
     
+    # Asegurar el esquema (incluida la tabla nueva clientes_importados_pendientes) antes de limpiar
+    database.init_db()
+
     # Limpiar base de datos para la prueba
     conn = database.get_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM clientes WHERE phone_number IN ('34600000001', '34600000002', '34600000003')")
+    c.execute("DELETE FROM clientes WHERE phone_number IN ('34600000001', '34600000002', '34600000003', '34600112233')")
+    c.execute("DELETE FROM clientes_importados_pendientes WHERE nombre = 'Marta Sin Telefono'")
     conn.commit()
     conn.close()
 
@@ -147,8 +155,19 @@ async def main_test():
     assert cli_1["idioma_preferido"] == "es", "Idioma preferido incorrecto"
     
     cli_2 = database.get_cliente_by_phone("34600000002")
-    assert cli_2 is None, "Pedro Gómez (NIF vacío) fue importado incorrectamente"
-    logger.info("✅ Validaciones de obligatorios y Upsert verificados en SQLite.")
+    assert cli_2 is not None, "Pedro Gómez (con teléfono pero sin NIF) debería haberse importado, el NIF ya no es obligatorio"
+    assert cli_2["nif_cif"] is None, "El NIF de Pedro Gómez debería haber quedado vacío, no inventado"
+    logger.info("✅ NIF ya no bloquea el alta cuando hay teléfono; Upsert verificado en SQLite.")
+
+    ejemplo_colado = database.get_cliente_by_phone("34600112233")
+    assert ejemplo_colado is None, "La fila de ejemplo (Ana López García) no debería haberse importado como cliente real"
+    logger.info("✅ Fila de ejemplo detectada por contenido y omitida correctamente.")
+
+    pendientes = database.listar_clientes_pendientes()
+    marta = next((p for p in pendientes if p["nombre"] == "Marta Sin Telefono"), None)
+    assert marta is not None, "Marta Sin Telefono (sin teléfono) debería haber quedado en la lista de espera"
+    assert marta["numero_expediente"] == "2024-010", f"El expediente debería haberse extraído de la ruta de SharePoint, obtenido: {marta['numero_expediente']}"
+    logger.info("✅ Cliente sin teléfono cargado en la lista de espera con expediente extraído de la ruta.")
 
     # 3. Ejecutar importación del reordenado (mapeo por nombre de columna)
     print("\n--- Ejecutando importación con columnas reordenadas ---")

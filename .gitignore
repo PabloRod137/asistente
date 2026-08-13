@@ -27,6 +27,8 @@ env/
 .docker-data/
 mysql_data/
 storage/
+plantilla_clientes_maira.xlsx
+clientes.json
 
 # === ARCHIVOS DEL SISTEMA OPERATIVO ===
 .DS_Store
