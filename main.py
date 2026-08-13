@@ -1,4 +1,7 @@
 import os
+import hmac
+import hashlib
+import json
 import logging
 import asyncio
 from datetime import datetime
@@ -26,13 +29,31 @@ import gestor_mode
 import client_memory
 import escalado_humano
 import secretaria
+import captura_estructurada
+import rate_limiter
 
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
 secretaria.set_scheduler(scheduler)
 
+# Conjunto de tareas en segundo plano en curso (captura estructurada). Guardamos una referencia
+# fuerte a cada una porque asyncio solo mantiene una referencia débil a las tareas creadas con
+# create_task — sin esto, el recolector de basura podría liberarlas a mitad de ejecución. Se
+# auto-eliminan del conjunto en cuanto terminan (add_done_callback).
+_tareas_en_segundo_plano: set = set()
+
+def lanzar_tarea_segundo_plano(coro):
+    tarea = asyncio.create_task(coro)
+    _tareas_en_segundo_plano.add(tarea)
+    tarea.add_done_callback(_tareas_en_segundo_plano.discard)
+    return tarea
+
 APP_NAME = os.getenv("APP_NAME", "SuperAsistente Comercial")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "pimia_secret_asistente_2026")
+
+# Secreto de la app de Meta para validar la firma HMAC de cada webhook entrante (ver auditoría:
+# sin esto, cualquiera puede falsificar mensajes de WhatsApp, incluido el número del gestor).
+APP_SECRET = os.getenv("META_APP_SECRET", "")
 
 app = FastAPI(title=APP_NAME)
 
@@ -147,6 +168,42 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
     """
     Orquesta la respuesta del bot decidiendo a qué módulo derivar el mensaje de forma asíncrona.
     """
+    # Nota de voz de WhatsApp (Fase 8.2): se descarga, se transcribe con Gemini y el texto
+    # resultante se reprocesa como si el cliente lo hubiera escrito, para heredar automáticamente
+    # todo el enrutado existente (alta de cliente, triaje, tickets, agenda, intención, captura
+    # estructurada) sin duplicar lógica.
+    if msg_type == "audio":
+        media_id = content
+        storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
+        temp_filepath = os.path.join(storage_ruta, "temp", f"audio_{phone_number}_{int(datetime.now().timestamp())}.ogg")
+
+        logger.info(f"Descargando nota de voz de WhatsApp Media ID: {media_id}...")
+        if not await whatsapp.download_whatsapp_media(media_id, temp_filepath):
+            return "No he podido descargar el audio que has enviado. Inténtalo de nuevo."
+
+        try:
+            transcripcion = await captura_estructurada.transcribir_audio(temp_filepath, mime_type="audio/ogg")
+        finally:
+            # En un finally para que el archivo se borre también si la transcripción se
+            # cancela o falla de una forma que un simple except Exception no cubriría.
+            try:
+                if os.path.exists(temp_filepath):
+                    os.remove(temp_filepath)
+            except Exception as e:
+                logger.error(f"Error eliminando audio temporal {temp_filepath}: {e}")
+
+        if not transcripcion:
+            return "No he podido entender el audio que has enviado. ¿Puedes escribirlo o repetirlo, por favor?"
+
+        logger.info(f"Audio de {phone_number} transcrito: {transcripcion[:100]}...")
+        # Sustituye el placeholder '[Envía Nota de Voz]' guardado al llegar el audio por el
+        # texto real, para que el historial conserve el contenido en turnos futuros.
+        database.actualizar_ultimo_mensaje_usuario(phone_number, transcripcion)
+        lanzar_tarea_segundo_plano(
+            captura_estructurada.generar_captura_estructurada(phone_number, transcripcion, "whatsapp_audio")
+        )
+        return await procesar_flujo_mensaje(phone_number, transcripcion, "text")
+
     history = database.get_history(phone_number, limit=5)
     
     # Flujo de ALTA DE CLIENTE activo
@@ -246,8 +303,30 @@ Instrucción: Genera una respuesta amigable en tu tono comercial informándole d
 @app.post("/webhook")
 async def receive_message(request: Request):
     try:
-        body = await request.json()
-        
+        # Validación de firma HMAC de Meta (evita que cualquiera pueda falsificar mensajes
+        # entrantes, incluida una suplantación del número del gestor con privilegios completos).
+        signature_header = request.headers.get("X-Hub-Signature-256")
+        raw_body = await request.body()
+
+        if not APP_SECRET:
+            logger.error("Falta definir META_APP_SECRET en el .env. No se puede validar el webhook.")
+            raise HTTPException(status_code=500, detail="Error de configuración interna.")
+
+        if not signature_header or not signature_header.startswith("sha256="):
+            logger.warning("Webhook rechazado: firma de Meta faltante o malformada.")
+            raise HTTPException(status_code=403, detail="Firma de webhook faltante o malformada")
+
+        expected_signature = signature_header.split("sha256=")[1]
+        computed_signature = hmac.new(
+            APP_SECRET.encode('utf-8'), raw_body, hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(computed_signature, expected_signature):
+            logger.warning("Webhook rechazado: la firma no coincide.")
+            raise HTTPException(status_code=403, detail="Verificación de firma de Meta fallida")
+
+        body = json.loads(raw_body.decode('utf-8'))
+
         if body.get("object") == "whatsapp_business_account":
             for entry in body.get("entry", []):
                 for change in entry.get("changes", []):
@@ -262,12 +341,18 @@ async def receive_message(request: Request):
                                 content = message.get("text", {}).get("body", "")
                             elif msg_type == "image":
                                 content = message.get("image", {}).get("id", "")
-                                
+                            elif msg_type == "audio":
+                                content = message.get("audio", {}).get("id", "")
+
                             if not content:
                                 continue
-                                
+
+                            if not rate_limiter.permitido(f"webhook:{phone_number}", max_peticiones=20, ventana_segundos=60):
+                                logger.warning(f"Mensaje de {phone_number} descartado por límite de tasa.")
+                                continue
+
                             logger.info(f"Mensaje recibido de {phone_number} [Tipo: {msg_type}]")
-                            
+
                             if phone_number == os.getenv("GESTOR_WHATSAPP"):
                                 respuesta_gestor = await gestor_mode.procesar_comando(phone_number, content)
                                 if respuesta_gestor is not None:
@@ -280,15 +365,23 @@ async def receive_message(request: Request):
                                 database.save_message(phone_number, "user", content)
                             elif msg_type == "image":
                                 database.save_message(phone_number, "user", "[Envía Imagen]")
-                                
+                            elif msg_type == "audio":
+                                database.save_message(phone_number, "user", "[Envía Nota de Voz]")
+
+
                             escalado_humano.resolver_ticket_si_despedida(phone_number, content)
                             conversation_summary.registrar_actividad(phone_number)
                             
                             ai_response = await procesar_flujo_mensaje(phone_number, content, msg_type)
-                            
+
                             database.save_message(phone_number, "assistant", ai_response)
                             await whatsapp.send_whatsapp_message(phone_number, ai_response)
-                            
+
+                            if msg_type == "text":
+                                lanzar_tarea_segundo_plano(
+                                    captura_estructurada.generar_captura_estructurada(phone_number, content, "whatsapp_texto")
+                                )
+
                             if escalado_humano.detectar_necesidad_escalado(ai_response):
                                 await escalado_humano.crear_ticket_escalado(phone_number, content, ai_response)
                             
@@ -298,19 +391,25 @@ async def receive_message(request: Request):
             return {"status": "success"}
         else:
             raise HTTPException(status_code=404, detail="No es un evento de WhatsApp")
-            
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Error procesando webhook de WhatsApp: {e}")
         return {"status": "error"}
 
 @app.post("/chat-web")
-async def chat_web(data: dict):
+async def chat_web(request: Request, data: dict):
     mensaje = data.get("mensaje")
     phone_number = data.get("phone_number", "web_user")
-    
+
     if not mensaje:
         raise HTTPException(status_code=400, detail="Falta el mensaje")
-        
+
+    cliente_ip = request.client.host if request.client else "desconocido"
+    if not rate_limiter.permitido(f"chat-web:{cliente_ip}", max_peticiones=20, ventana_segundos=60):
+        raise HTTPException(status_code=429, detail="Demasiadas peticiones, inténtalo de nuevo en un momento.")
+
     client_memory.registrar_visita(phone_number)
     database.save_message(phone_number, "user", mensaje)
     escalado_humano.resolver_ticket_si_despedida(phone_number, mensaje)
@@ -318,7 +417,11 @@ async def chat_web(data: dict):
     
     ai_response = await procesar_flujo_mensaje(phone_number, mensaje, "text")
     database.save_message(phone_number, "assistant", ai_response)
-    
+
+    lanzar_tarea_segundo_plano(
+        captura_estructurada.generar_captura_estructurada(phone_number, mensaje, "chat_web")
+    )
+
     if escalado_humano.detectar_necesidad_escalado(ai_response):
         await escalado_humano.crear_ticket_escalado(phone_number, mensaje, ai_response)
         

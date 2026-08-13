@@ -75,7 +75,10 @@ async def procesar_comando(phone_number: str, message: str) -> str:
             "• `/plazo_fiscal \"{modelo}\" \"{cliente}\" {fecha} {tel_opcional}` - Añadir plazo fiscal.\n"
             "• `/documento_pendiente {tel} \"{desc}\" {fecha_limite}` - Dar de alta documento pendiente.\n"
             "• `/documento_recibido {id}` - Marcar documento pendiente como recibido.\n"
-            "• `/pendientes_documentos` - Listar documentos pendientes de entrega por clientes."
+            "• `/pendientes_documentos` - Listar documentos pendientes de entrega por clientes.\n\n"
+            "🎙️ *Captura Estructurada (Fase 8):*\n"
+            "• `/capturas_pendientes` - Listar las últimas capturas estructuradas sin revisar.\n"
+            "• `/captura_revisada {id}` - Marcar una captura estructurada como revisada."
         )
         
     elif cmd == "/clientes_hoy":
@@ -109,6 +112,34 @@ async def procesar_comando(phone_number: str, message: str) -> str:
         conn.close()
         return respuesta
         
+    elif cmd == "/capturas_pendientes":
+        capturas = database.get_capturas_pendientes(limit=10)
+        if not capturas:
+            return "No hay capturas estructuradas pendientes de revisión."
+
+        respuesta = "🎙️ *Capturas estructuradas pendientes:*\n"
+        for c in capturas:
+            confianza_str = f"{c['confianza']}%" if c['confianza'] is not None else "?"
+            respuesta += (
+                f"\n#{c['id']} — *{c['phone_number']}* ({c['canal']}, confianza {confianza_str})\n"
+                f"  👤 Cliente: {c['cliente_probable'] or '—'} | 📂 Área: {c['area_probable'] or '—'}\n"
+                f"  📝 Asunto: {c['asunto'] or '—'}\n"
+                f"  ⏰ Urgencia: {c['urgencia'] or '—'} | 🛠️ Servicio: {c['servicio_sugerido'] or '—'}\n"
+                f"  📄 Docs mencionados: {c['documentos_mencionados'] or '—'} | 📁 Expediente probable: {c['expediente_probable'] or '—'}\n"
+                f"  💬 Solicitud: {c['solicitud'] or '—'}\n"
+            )
+        respuesta += "\nUsa `/captura_revisada {id}` para marcar una como revisada."
+        return respuesta
+
+    elif cmd == "/captura_revisada":
+        captura_id_str = args.strip()
+        if not captura_id_str.isdigit():
+            return "Formato incorrecto. Usa: /captura_revisada {id}"
+        ok = database.marcar_captura_revisada(int(captura_id_str))
+        if ok:
+            return f"Captura #{captura_id_str} marcada como revisada ✅"
+        return f"No se encontró ninguna captura pendiente con id #{captura_id_str}."
+
     elif cmd == "/resumen_semana":
         conn = database.get_connection()
         cursor = conn.cursor()
@@ -144,7 +175,7 @@ El resumen semanal debe incluir:
 
 Por favor, sé conciso y estructurado, usa viñetas."""
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}]
         }
