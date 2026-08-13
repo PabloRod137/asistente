@@ -41,7 +41,7 @@ async def detectar_intencion(message: str) -> str:
     if not message or len(message.strip()) < 2:
         return "CHAT"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
     
     prompt = f"""
     Clasifica el siguiente mensaje de un cliente en exactamente una de estas categorías en mayúsculas:
@@ -61,7 +61,7 @@ async def detectar_intencion(message: str) -> str:
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "maxOutputTokens": 10,
+            "maxOutputTokens": 200,
             "temperature": 0.0
         }
     }

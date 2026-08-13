@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import asyncio
 import pdfplumber
@@ -9,10 +10,28 @@ logger = logging.getLogger(__name__)
 _cached_content = ""
 _last_mtimes = {}  # file_path -> mtime
 
-def cargar_conocimiento() -> str:
+# Encabezados de sección (estilo Markdown "## Título") que marcan contenido dirigido solo al
+# equipo interno, nunca a un cliente. Se recorta antes de inyectarlo en el prompt de cara al
+# cliente (llm.py) — no basta con la instrucción en texto libre dentro del propio knowledge.txt
+# ("no compartir con clientes"), porque eso depende por completo de que el modelo la respete.
+_PATRON_SECCION_INTERNA = re.compile(
+    r"^##\s*Notas?\s+internas?.*?$(?:\n(?!##\s).*)*",
+    re.IGNORECASE | re.MULTILINE
+)
+
+def _filtrar_contenido_interno(texto: str) -> str:
+    """Elimina cualquier sección '## Notas internas ...' antes de devolver el conocimiento
+    para uso de cara al cliente. El contenido crudo (sin filtrar) sigue siendo el que se cachea
+    y el que se usa para el parseo interno de plazos fiscales."""
+    return _PATRON_SECCION_INTERNA.sub("", texto).strip()
+
+def cargar_conocimiento(incluir_notas_internas: bool = False) -> str:
     """
     Carga el conocimiento del negocio desde knowledge.txt o knowledge.pdf.
     Cachea el resultado y lo recarga solo si el archivo ha sido modificado.
+
+    Por defecto (incluir_notas_internas=False, el caso de uso normal de cara al cliente en
+    llm.py) se recorta cualquier sección "## Notas internas" antes de devolver el texto.
     """
     global _cached_content, _last_mtimes
     
@@ -33,7 +52,7 @@ def cargar_conocimiento() -> str:
         return ""
         
     if current_mtimes == _last_mtimes:
-        return _cached_content
+        return _cached_content if incluir_notas_internas else _filtrar_contenido_interno(_cached_content)
         
     loaded_parts = []
     
@@ -71,4 +90,4 @@ def cargar_conocimiento() -> str:
     except Exception as se:
         logger.error(f"Error procesando plazos fiscales en base de conocimiento: {se}")
 
-    return _cached_content
+    return _cached_content if incluir_notas_internas else _filtrar_contenido_interno(_cached_content)

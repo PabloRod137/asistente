@@ -49,7 +49,7 @@ El bot cuenta con memoria a corto plazo en memoria (`dict` en Python) para contr
 
 ## 🧠 Detector de Intenciones (Router)
 
-El archivo [`router.py`](file:///c:/proyectos/automatizacion/EjercitoDeBots/asistente/router.py) utiliza `gemini-2.0-flash` para interceptar cada mensaje de texto nuevo e identificar su intención:
+El archivo [`router.py`](file:///c:/proyectos/automatizacion/EjercitoDeBots/asistente/router.py) utiliza `gemini-flash-latest` para interceptar cada mensaje de texto nuevo e identificar su intención:
 * **`AGENDA`**: Reserva de citas, consulta de fechas, cancelaciones o modificaciones.
 * **`TICKET`**: Envío de imágenes de tickets, recibos o facturas recibidas de gastos.
 * **`FACTURA`**: Solicitud de creación de facturas (ej. *"hazme una factura por 200€ a..."*).

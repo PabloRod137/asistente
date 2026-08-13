@@ -171,7 +171,7 @@ async def procesar_solicitud_factura(phone_number: str, message: str) -> str:
         if not api_key:
             return "Servicio de facturación no disponible temporalmente (Falta API Key)."
             
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
         
         prompt = f"""
         Analiza la siguiente petición para generar una factura y extrae los datos fiscales:

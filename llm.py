@@ -15,7 +15,7 @@ def get_system_prompt() -> str:
 
 async def generate_response(message: str, history: list, phone_number: str = "web_user", contexto_adicional: str = None, raise_on_error: bool = False) -> str:
     """
-    Genera la respuesta conversacional usando la API de Gemini 2.0 Flash de forma asíncrona.
+    Genera la respuesta conversacional usando la API de Gemini (modelo flash vigente) de forma asíncrona.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -67,7 +67,7 @@ INSTRUCCIÓN CRÍTICA: Estás hablando con {nombre}. Salúdalo cordialmente por 
     modo_test = os.getenv("MODO_TEST", "false").strip().lower() == "true"
     
     # URL de Gemini REST API
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
     
     # Construir historial en el formato esperado por Gemini API
     contents = []

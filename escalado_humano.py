@@ -42,7 +42,7 @@ async def clasificar_especialidad(mensaje_cliente: str, respuesta_maira: str) ->
     if not api_key:
         return "general"
         
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
     
     prompt = f"""
     Analiza la consulta del cliente y clasifícala en exactamente una de estas especialidades en minúsculas:
@@ -61,7 +61,7 @@ async def clasificar_especialidad(mensaje_cliente: str, respuesta_maira: str) ->
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 10, "temperature": 0.0}
+        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.0}
     }
     
     try:

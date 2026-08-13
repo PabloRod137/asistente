@@ -39,18 +39,18 @@ def registrar_actividad(phone_number: str):
     
     if not row or row[0] == 1:
         cursor.execute('''
-            INSERT INTO conversaciones (phone_number, inicio, ultima_actividad, resumen_enviado)
+            INSERT INTO conversaciones (phone_number, inicio, ultimo_mensaje, resumen_enviado)
             VALUES (?, ?, ?, 0)
             ON CONFLICT(phone_number) DO UPDATE SET
                 inicio = excluded.inicio,
-                ultima_actividad = excluded.ultima_actividad,
+                ultimo_mensaje = excluded.ultimo_mensaje,
                 resumen_enviado = 0,
                 resumen_texto = NULL
         ''', (phone_number, now_str, now_str))
         logger.info(f"Iniciada nueva conversación activa para {phone_number}")
     else:
         cursor.execute('''
-            UPDATE conversaciones SET ultima_actividad = ? WHERE phone_number = ?
+            UPDATE conversaciones SET ultimo_mensaje = ? WHERE phone_number = ?
         ''', (now_str, phone_number))
         
     conn.commit()
@@ -122,7 +122,7 @@ Sé conciso. Máximo 15 líneas. Usa viñetas.
 CONVERSACIÓN:
 {historial}"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
     payload = {
         "contents": [{
             "parts": [{"text": prompt}]
