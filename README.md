@@ -262,11 +262,11 @@ Visibilidad para el gestor: comando `/documentos_puente` en WhatsApp (ver `gesto
 
 Además de WhatsApp, Maira puede recibir mensajes por Telegram — pensado como canal de pruebas rápido (sin necesidad de app de Meta ni webhook público, funciona por *polling*). Se activa solo si `TELEGRAM_BOT_TOKEN` está definido en el `.env` (crear el bot con [@BotFather](https://t.me/BotFather)).
 
-Un mensaje de texto por Telegram pasa por el **mismo** `procesar_flujo_mensaje` que WhatsApp texto, así que hereda automáticamente todo el enrutado: alta de cliente, triaje, agenda, captura estructurada, escalado a humano, etc.
+Un mensaje de texto por Telegram pasa por el **mismo** `procesar_flujo_mensaje` que WhatsApp texto, así que hereda automáticamente todo el enrutado: alta de cliente, triaje, agenda, captura estructurada, escalado a humano, etc. Los **documentos** (PDF, Word, Excel, etc.) también están soportados: se suben a la carpeta puente igual que por WhatsApp, reutilizando `puente_claudia.py` (solo cambia la forma de descargar el archivo, propia de la API de Telegram).
 
 **Limitaciones conocidas de esta integración (aceptadas para pruebas, no para producción):**
 - Un mismo cliente que escriba por WhatsApp y por Telegram queda como **dos identidades distintas** en la base de datos (no hay fusión automática entre `phone_number` y `chat_id` de Telegram).
-- Solo se maneja **texto**. Fotos, documentos, audio o vídeo por Telegram reciben un aviso genérico, no se procesan.
+- Fotos, audio o vídeo por Telegram (a diferencia de documentos) siguen recibiendo un aviso genérico, no se procesan.
 - Las respuestas *salientes* que ya existían antes de esto (`/responder_{id}` del gestor, recordatorios automáticos de documentos/plazos fiscales, avisos de cobro) siguen enviándose **solo por WhatsApp**, incluso si el ticket/cliente en cuestión llegó por Telegram — para que también salgan por Telegram habría que hacer esos módulos conscientes del canal de origen, que queda fuera de esta ronda.
 - Los comandos de gestor por Telegram requieren `GESTOR_TELEGRAM_CHAT_ID` (el chat_id numérico de Telegram, distinto del número de `GESTOR_WHATSAPP`).
 

@@ -10,6 +10,7 @@ import escalado_humano
 import conversation_summary
 import captura_estructurada
 import gestor_mode
+import puente_claudia
 
 logger = logging.getLogger("asistente.telegram_handler")
 
@@ -17,15 +18,20 @@ logger = logging.getLogger("asistente.telegram_handler")
 # Chatbot genérico, que gestiona un diccionario de bots por client_id).
 _app = None
 
-MSG_SOLO_TEXTO = "Por ahora, por Telegram solo puedo leer mensajes de texto. ¿Puedes escribírmelo, por favor?"
+MSG_SOLO_TEXTO_O_DOCUMENTO = "Por ahora, por Telegram solo puedo leer mensajes de texto o documentos. ¿Puedes escribírmelo o enviármelo así, por favor?"
+MSG_ERROR_DESCARGA_DOCUMENTO = "No he podido descargar el documento que has enviado. Inténtalo de nuevo."
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
+    if update.message.document:
+        await _handle_documento(update)
+        return
+
     if not update.message.text:
-        await update.message.reply_text(MSG_SOLO_TEXTO)
+        await update.message.reply_text(MSG_SOLO_TEXTO_O_DOCUMENTO)
         return
 
     # Se usa el chat_id de Telegram como identificador, en el mismo campo phone_number que
@@ -65,6 +71,50 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if conversation_summary.detectar_despedida(texto):
         await conversation_summary.generar_y_enviar_resumen(chat_id)
+
+
+async def _handle_documento(update: Update):
+    """
+    Documento de Telegram (PDF, Word, Excel, etc.) -- misma idea que el manejo de documentos
+    de WhatsApp: Maira no lo interpreta, lo sube a la carpeta puente para que Claudia lo recoja.
+    Reutiliza puente_claudia (canal-agnóstico) y solo cambia la forma de descargar el archivo,
+    propia de la API de Telegram.
+    """
+    chat_id = str(update.effective_chat.id)
+    doc = update.message.document
+    nombre_original = doc.file_name or f"documento_{doc.file_id}"
+    mime_type = doc.mime_type or "application/octet-stream"
+
+    logger.info(f"[Telegram] Documento recibido de {chat_id}: {nombre_original}")
+
+    try:
+        archivo_telegram = await doc.get_file()
+        contenido_bytes = bytes(await archivo_telegram.download_as_bytearray())
+    except Exception as e:
+        logger.error(f"Error descargando documento de Telegram ({chat_id}, {nombre_original}): {e}")
+        await update.message.reply_text(MSG_ERROR_DESCARGA_DOCUMENTO)
+        return
+
+    import main
+
+    client_memory.registrar_visita(chat_id)
+    database.save_message(chat_id, "user", f"[Documento: {nombre_original}]")
+    conversation_summary.registrar_actividad(chat_id)
+
+    await puente_claudia.enviar_a_carpeta_puente(chat_id, contenido_bytes, nombre_original, mime_type)
+
+    main.lanzar_tarea_segundo_plano(
+        captura_estructurada.generar_captura_estructurada(
+            chat_id, f"[El cliente ha enviado un documento: {nombre_original}]", "telegram_documento"
+        )
+    )
+
+    respuesta = (
+        f"He recibido tu documento '{nombre_original}'. Lo hemos enviado a nuestro equipo de gestión "
+        f"para que lo revise y lo incorpore a tu expediente. Te avisaremos en cuanto esté procesado."
+    )
+    database.save_message(chat_id, "assistant", respuesta)
+    await update.message.reply_text(respuesta)
 
 
 async def iniciar_bot_telegram():
