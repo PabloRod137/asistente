@@ -127,6 +127,15 @@ asistente/
 * **`POST /webhook`**: Recepción de eventos en tiempo real de WhatsApp (mensajes de texto e imágenes).
 * **`POST /chat-web`**: Endpoint conversacional para integrar un Widget Web Chat o probar flujos conversacionales de forma rápida enviando JSON.
 * **`POST /cobrar`**: Endpoint de integración para notificaciones externas de facturas vencidas.
+* **`GET /panel`**: Panel visual de estadísticas (ver sección [Panel Visual](#-panel-visual) más abajo).
+
+---
+
+## 📊 Panel Visual
+
+Dashboard de solo lectura en `/panel` con el resumen de actividad de Maira: conversaciones (totales, hoy, últimos 7 días), tasa de autoresolución (conversaciones que no necesitaron escalado), clientes (totales, nuevos, pendientes de vincular teléfono), capturas estructuradas (totales, sin revisar, por urgencia), escalados a humano y actividad reciente de la [carpeta puente](#-carpeta-puente-maira--claudia--alberto).
+
+Protegido con **HTTP Basic Auth** — el navegador pide usuario (cualquiera vale, no se valida) y contraseña, que debe coincidir con `PANEL_PASSWORD` en el `.env`. Sin esa variable definida, `/panel` responde `503` en vez de exponer nada. Vive en el mismo servidor de Maira (no requiere infraestructura ni despliegue aparte); si más adelante se quiere en un subdominio propio del despacho, sería un paso de hosting/DNS aparte, no de código.
 
 ---
 

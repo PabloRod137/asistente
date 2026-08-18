@@ -33,6 +33,7 @@ import captura_estructurada
 import rate_limiter
 import puente_claudia
 import telegram_handler
+import panel
 
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
@@ -61,10 +62,12 @@ app = FastAPI(title=APP_NAME)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(panel.router)
 
 @app.on_event("startup")
 async def on_startup():
