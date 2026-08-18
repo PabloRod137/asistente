@@ -294,6 +294,22 @@ def init_db():
         )
     ''')
 
+    # Tabla documentos_puente (carpeta puente Maira <-> Claudia <-> Alberto): registra cada
+    # documento que entra (cliente -> Claudia) o sale (Claudia -> cliente) de la carpeta puente.
+    # UNIQUE en ruta_logica: sirve como mecanismo de idempotencia para el job periódico que
+    # revisa la carpeta de salida, para no reenviar dos veces el mismo archivo al cliente.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS documentos_puente (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            direccion TEXT NOT NULL,         -- 'entrada' (cliente -> Claudia) | 'salida' (Claudia -> cliente)
+            ruta_logica TEXT NOT NULL UNIQUE,
+            nombre_archivo TEXT NOT NULL,
+            mime_type TEXT,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     
     # Ejecutar la migración de autoincrement sobre la tabla facturas si fuese necesario
@@ -996,5 +1012,43 @@ def marcar_captura_revisada(captura_id: int) -> bool:
     conn.commit()
     conn.close()
     return rows_affected > 0
+
+
+def registrar_documento_puente(phone_number: str, direccion: str, ruta_logica: str, nombre_archivo: str, mime_type: str = None) -> int | None:
+    """
+    Registra un documento de la carpeta puente (entrada o salida). Atómico e idempotente por
+    ruta_logica: si ya existe un registro con esa ruta (p.ej. el job de revisión de salida lo
+    encontró en una pasada anterior), no lo duplica y retorna None en vez de insertar de nuevo.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO documentos_puente (phone_number, direccion, ruta_logica, nombre_archivo, mime_type)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (phone_number, direccion, ruta_logica, nombre_archivo, mime_type))
+        new_id = cursor.lastrowid
+        conn.commit()
+        return new_id
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def get_documentos_puente_recientes(limit: int = 15) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, phone_number, direccion, ruta_logica, nombre_archivo, mime_type, creado_en
+        FROM documentos_puente
+        ORDER BY creado_en DESC
+        LIMIT ?
+    ''', (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    columnas = ["id", "phone_number", "direccion", "ruta_logica", "nombre_archivo", "mime_type", "creado_en"]
+    return [dict(zip(columnas, row)) for row in rows]
 
 

@@ -31,6 +31,7 @@ import escalado_humano
 import secretaria
 import captura_estructurada
 import rate_limiter
+import puente_claudia
 
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
@@ -147,6 +148,21 @@ async def on_startup():
     except Exception as e:
         logger.error(f"Error programando purga periódica de sesiones expiradas: {e}")
 
+    # Programar revisión periódica de la carpeta puente (lo que Claudia deja listo para enviar)
+    try:
+        intervalo_puente = int(os.getenv("PUENTE_CLAUDIA_INTERVALO_MINUTOS", "10"))
+        scheduler.add_job(
+            puente_claudia.revisar_carpeta_salida,
+            trigger="interval",
+            minutes=intervalo_puente,
+            id="revisar_carpeta_puente_claudia",
+            max_instances=1,
+            replace_existing=True
+        )
+        logger.info(f"Programada revisión periódica de la carpeta puente cada {intervalo_puente} minutos.")
+    except Exception as e:
+        logger.error(f"Error programando la revisión de la carpeta puente: {e}")
+
 
 @app.get("/")
 def read_root():
@@ -203,6 +219,37 @@ async def procesar_flujo_mensaje(phone_number: str, content: str, msg_type: str)
             captura_estructurada.generar_captura_estructurada(phone_number, transcripcion, "whatsapp_audio")
         )
         return await procesar_flujo_mensaje(phone_number, transcripcion, "text")
+
+    # Documento de WhatsApp (PDF, Word, Excel, etc.) — Maira no lo interpreta, lo sube a la
+    # carpeta puente para que Claudia lo recoja y lo incorpore al expediente del cliente.
+    if msg_type == "document":
+        media_id = content.get("id")
+        nombre_original = content.get("filename") or f"documento_{int(datetime.now().timestamp())}"
+        mime_type = content.get("mime_type", "application/octet-stream")
+        storage_ruta = os.getenv("STORAGE_RUTA", "./storage")
+        temp_filepath = os.path.join(storage_ruta, "temp", f"puente_entrada_{phone_number}_{int(datetime.now().timestamp())}_{nombre_original}")
+
+        logger.info(f"Descargando documento de WhatsApp Media ID: {media_id} ({nombre_original})...")
+        if not await whatsapp.download_whatsapp_media(media_id, temp_filepath):
+            return "No he podido descargar el documento que has enviado. Inténtalo de nuevo."
+
+        try:
+            with open(temp_filepath, "rb") as f:
+                contenido_bytes = f.read()
+        finally:
+            try:
+                if os.path.exists(temp_filepath):
+                    os.remove(temp_filepath)
+            except Exception as e:
+                logger.error(f"Error eliminando temporal de documento entrante {temp_filepath}: {e}")
+
+        await puente_claudia.enviar_a_carpeta_puente(phone_number, contenido_bytes, nombre_original, mime_type)
+        lanzar_tarea_segundo_plano(
+            captura_estructurada.generar_captura_estructurada(
+                phone_number, f"[El cliente ha enviado un documento: {nombre_original}]", "whatsapp_documento"
+            )
+        )
+        return f"He recibido tu documento '{nombre_original}'. Lo hemos enviado a nuestro equipo de gestión para que lo revise y lo incorpore a tu expediente. Te avisaremos en cuanto esté procesado."
 
     history = database.get_history(phone_number, limit=5)
     
@@ -343,6 +390,8 @@ async def receive_message(request: Request):
                                 content = message.get("image", {}).get("id", "")
                             elif msg_type == "audio":
                                 content = message.get("audio", {}).get("id", "")
+                            elif msg_type == "document":
+                                content = message.get("document", {})
 
                             if not content:
                                 continue
@@ -353,25 +402,33 @@ async def receive_message(request: Request):
 
                             logger.info(f"Mensaje recibido de {phone_number} [Tipo: {msg_type}]")
 
-                            if phone_number == os.getenv("GESTOR_WHATSAPP"):
+                            if msg_type == "text" and phone_number == os.getenv("GESTOR_WHATSAPP"):
                                 respuesta_gestor = await gestor_mode.procesar_comando(phone_number, content)
                                 if respuesta_gestor is not None:
                                     await whatsapp.send_whatsapp_message(phone_number, respuesta_gestor)
                                     continue
-                            
+
                             client_memory.registrar_visita(phone_number)
-                            
+
+                            # Representación siempre-string de lo recibido, para todo lo que espera texto
+                            # (guardado en historial, detección de despedida/escalado). 'content' en sí puede
+                            # ser un dict para msg_type == "document" (id, filename, mime_type de WhatsApp).
                             if msg_type == "text":
-                                database.save_message(phone_number, "user", content)
+                                content_texto = content
                             elif msg_type == "image":
-                                database.save_message(phone_number, "user", "[Envía Imagen]")
+                                content_texto = "[Envía Imagen]"
                             elif msg_type == "audio":
-                                database.save_message(phone_number, "user", "[Envía Nota de Voz]")
+                                content_texto = "[Envía Nota de Voz]"
+                            elif msg_type == "document":
+                                content_texto = f"[Documento: {content.get('filename', 'sin nombre')}]"
+                            else:
+                                content_texto = ""
 
+                            database.save_message(phone_number, "user", content_texto)
 
-                            escalado_humano.resolver_ticket_si_despedida(phone_number, content)
+                            escalado_humano.resolver_ticket_si_despedida(phone_number, content_texto)
                             conversation_summary.registrar_actividad(phone_number)
-                            
+
                             ai_response = await procesar_flujo_mensaje(phone_number, content, msg_type)
 
                             database.save_message(phone_number, "assistant", ai_response)
@@ -383,9 +440,9 @@ async def receive_message(request: Request):
                                 )
 
                             if escalado_humano.detectar_necesidad_escalado(ai_response):
-                                await escalado_humano.crear_ticket_escalado(phone_number, content, ai_response)
-                            
-                            if conversation_summary.detectar_despedida(content):
+                                await escalado_humano.crear_ticket_escalado(phone_number, content_texto, ai_response)
+
+                            if conversation_summary.detectar_despedida(content_texto):
                                 await conversation_summary.generar_y_enviar_resumen(phone_number)
             
             return {"status": "success"}

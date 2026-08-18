@@ -78,7 +78,9 @@ async def procesar_comando(phone_number: str, message: str) -> str:
             "• `/pendientes_documentos` - Listar documentos pendientes de entrega por clientes.\n\n"
             "🎙️ *Captura Estructurada (Fase 8):*\n"
             "• `/capturas_pendientes` - Listar las últimas capturas estructuradas sin revisar.\n"
-            "• `/captura_revisada {id}` - Marcar una captura estructurada como revisada."
+            "• `/captura_revisada {id}` - Marcar una captura estructurada como revisada.\n\n"
+            "📁 *Carpeta Puente (Maira ↔ Claudia):*\n"
+            "• `/documentos_puente` - Ver actividad reciente de entrada/salida de la carpeta puente."
         )
         
     elif cmd == "/clientes_hoy":
@@ -139,6 +141,17 @@ async def procesar_comando(phone_number: str, message: str) -> str:
         if ok:
             return f"Captura #{captura_id_str} marcada como revisada ✅"
         return f"No se encontró ninguna captura pendiente con id #{captura_id_str}."
+
+    elif cmd == "/documentos_puente":
+        documentos = database.get_documentos_puente_recientes(limit=15)
+        if not documentos:
+            return "No hay actividad todavía en la carpeta puente."
+
+        respuesta = "📁 *Actividad reciente de la carpeta puente:*\n"
+        for d in documentos:
+            flecha = "➡️ Claudia" if d["direccion"] == "entrada" else "⬅️ Cliente"
+            respuesta += f"\n#{d['id']} — {flecha} | *{d['phone_number']}*\n  📄 {d['nombre_archivo']} ({d['creado_en']})\n"
+        return respuesta
 
     elif cmd == "/resumen_semana":
         conn = database.get_connection()

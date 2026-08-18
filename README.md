@@ -238,6 +238,26 @@ Para permitir que el bot interactúe con el tenant de Microsoft 365, es necesari
 
 ---
 
+## 📁 Carpeta Puente (Maira ↔ Claudia ↔ Alberto)
+
+Maira no crea expedientes ni genera documentos: eso lo hace **Claudia**, el agente de Microsoft 365 (Copilot) que ya usa el despacho. La comunicación entre ambas se hace a través de una carpeta compartida en `storage_adapter` (local o SharePoint, según `STORAGE_TIPO`), con esta estructura por cliente:
+
+```
+{SHAREPOINT_CARPETA_PUENTE}/{telefono_cliente}/entrada/   ← Maira sube aquí lo que recibe del cliente
+{SHAREPOINT_CARPETA_PUENTE}/{telefono_cliente}/salida/    ← Claudia deja aquí lo que hay que entregar al cliente
+```
+
+**Flujo de entrada (cliente → Claudia):** cuando un cliente envía un documento por WhatsApp (PDF, Word, Excel, o cualquier otro archivo — mensajes de tipo `document`, distintos de las fotos de tickets de gasto), Maira lo descarga, lo sube a `entrada/` y avisa al cliente de que lo ha recibido. Claudia lo recoge desde ahí.
+
+**Flujo de salida (Claudia → cliente):** un job periódico (`puente_claudia.revisar_carpeta_salida`, cada `PUENTE_CLAUDIA_INTERVALO_MINUTOS` minutos) revisa la carpeta `salida/` de cada cliente. Cualquier archivo nuevo que encuentre lo envía automáticamente por WhatsApp y lo registra en la tabla `documentos_puente` para no volver a enviarlo en la siguiente revisión.
+
+Visibilidad para el gestor: comando `/documentos_puente` en WhatsApp (ver `gestor_mode.py`).
+
+> [!NOTE]
+> Con `STORAGE_TIPO=local` (por defecto) la carpeta puente vive en el disco del servidor, útil para probar el flujo end-to-end pero **no visible para Claudia**. En cuanto se configure `STORAGE_TIPO=sharepoint` junto con las credenciales de Graph (`MS_CLIENT_ID` / `MS_CLIENT_SECRET`), la misma carpeta pasa a vivir en SharePoint sin cambiar código.
+
+---
+
 ## ⚠️ Reconciliación tras Fallback Local (Nota Operativa)
 
 Si Microsoft Graph no está disponible (red, credenciales incorrectas, expiración, etc.), Maira activará de forma automática el **fallback local/SMTP/simulado**:
