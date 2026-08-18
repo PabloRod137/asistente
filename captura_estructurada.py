@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 
 import database
+import client_matching
 from gemini_limiter import limiter
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,40 @@ MENSAJE DEL CLIENTE:
 """
 
 
+def _enriquecer_con_datos_reales(phone_number: str, datos: dict) -> dict:
+    """
+    Cruza la extracción de Gemini contra datos ya conocidos en la base de datos, para que
+    cliente_probable y expediente_probable dejen de ser una simple suposición del modelo a
+    partir del texto del mensaje, cuando existe una identidad verificable (prioridad 2 del
+    documento de operativa del despacho: "cerrar Maira -> Expediente, estructurando todas las
+    entradas"). Nunca decide ni fusiona nada por sí sola -- solo mejora esta captura concreta.
+    """
+    datos = dict(datos)
+
+    cliente_real = database.get_cliente_by_phone(phone_number)
+    if cliente_real:
+        # El teléfono ya identifica a un cliente real sin ambigüedad: más fiable que cualquier
+        # nombre que Gemini haya podido leer del texto suelto del mensaje.
+        if cliente_real.get("nombre"):
+            datos["cliente_probable"] = cliente_real["nombre"]
+        if not datos.get("expediente_probable") and cliente_real.get("numero_expediente"):
+            datos["expediente_probable"] = cliente_real["numero_expediente"]
+        return datos
+
+    # Teléfono todavía desconocido: si Gemini extrajo un nombre, comprobamos si coincide sin
+    # ambigüedad con algún cliente real de la lista de espera (mismo mecanismo conservador que
+    # ya usa alta_cliente.py para clientes reales sin teléfono asignado todavía).
+    nombre_extraido = datos.get("cliente_probable")
+    if nombre_extraido:
+        candidato = client_matching.buscar_coincidencia(nombre_extraido)
+        if candidato:
+            datos["cliente_probable"] = candidato["nombre"]
+            if not datos.get("expediente_probable") and candidato.get("numero_expediente"):
+                datos["expediente_probable"] = candidato["numero_expediente"]
+
+    return datos
+
+
 async def generar_captura_estructurada(phone_number: str, mensaje: str, canal: str) -> dict | None:
     """
     Genera y persiste la captura estructurada (Fase 8.1) de un mensaje entrante, en el formato
@@ -82,6 +117,7 @@ async def generar_captura_estructurada(phone_number: str, mensaje: str, canal: s
             datos = await asyncio.to_thread(_call_gemini_captura)
 
         datos_normalizados = {campo: datos.get(campo) for campo in CAMPOS_CAPTURA}
+        datos_normalizados = _enriquecer_con_datos_reales(phone_number, datos_normalizados)
         database.guardar_captura_estructurada(phone_number, canal, mensaje, datos_normalizados)
         return datos_normalizados
     except Exception as e:

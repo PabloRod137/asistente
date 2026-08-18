@@ -93,6 +93,74 @@ async def run_tests():
     assert not sigue_pendiente, "La captura ya no debe aparecer como pendiente tras marcarla revisada"
     logger.info("✅ TEST 5 superado: /captura_revisada retira la captura de pendientes.")
 
+    # -------------------------------------------------------------------------
+    # 6. Enriquecimiento: teléfono ya conocido -> sustituye el nombre/expediente de Gemini
+    #    por los datos reales de la ficha del cliente (prueba directa, sin llamar a Gemini)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 6: enriquecimiento con cliente real por teléfono ---")
+    TEL_CLIENTE_REAL = "34600009999"
+    conn = database.get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM clientes WHERE phone_number = ?", (TEL_CLIENTE_REAL,))
+    c.execute("""
+        INSERT INTO clientes (phone_number, nombre, tipo_cliente, numero_expediente, primera_visita, ultima_visita, total_conversaciones)
+        VALUES (?, 'Marta Fernandez Ruiz', 'activo', '2026-045', datetime('now'), datetime('now'), 1)
+    """, (TEL_CLIENTE_REAL,))
+    conn.commit()
+    conn.close()
+
+    datos_gemini_simulados = {
+        "cliente_probable": "una tal Marta", "area_probable": "fiscal", "asunto": "duda sobre IVA",
+        "urgencia": "baja", "solicitud": "informacion", "documentos_mencionados": None,
+        "servicio_sugerido": "consulta fiscal", "expediente_probable": None, "confianza": 60
+    }
+    enriquecido = captura_estructurada._enriquecer_con_datos_reales(TEL_CLIENTE_REAL, datos_gemini_simulados)
+    assert enriquecido["cliente_probable"] == "Marta Fernandez Ruiz", "Debe sustituir el nombre por el real de la ficha del cliente"
+    assert enriquecido["expediente_probable"] == "2026-045", "Debe rellenar el expediente real cuando Gemini no dio ninguno"
+    assert enriquecido["asunto"] == "duda sobre IVA", "No debe tocar los campos que no dependen de la identidad"
+    logger.info("✅ TEST 6 superado: teléfono conocido sustituye cliente/expediente por los datos reales.")
+
+    # -------------------------------------------------------------------------
+    # 7. Enriquecimiento: teléfono desconocido, pero el nombre coincide sin ambigüedad
+    #    con la lista de espera de clientes reales sin teléfono asignado
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 7: enriquecimiento con coincidencia en la lista de espera ---")
+    TEL_DESCONOCIDO = "34600008888"
+    conn = database.get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM clientes WHERE phone_number = ?", (TEL_DESCONOCIDO,))
+    c.execute("DELETE FROM clientes_importados_pendientes WHERE nombre = ?", ("Roberto Gimenez Castro",))
+    c.execute("""
+        INSERT INTO clientes_importados_pendientes (nombre, numero_expediente, tipo_cliente)
+        VALUES ('Roberto Gimenez Castro', '2026-099', 'activo')
+    """)
+    conn.commit()
+    conn.close()
+
+    datos_gemini_simulados_2 = {
+        "cliente_probable": "Roberto Gimenez", "area_probable": "laboral", "asunto": "baja voluntaria",
+        "urgencia": "media", "solicitud": "tramitar baja", "documentos_mencionados": None,
+        "servicio_sugerido": "baja voluntaria", "expediente_probable": None, "confianza": 70
+    }
+    enriquecido_2 = captura_estructurada._enriquecer_con_datos_reales(TEL_DESCONOCIDO, datos_gemini_simulados_2)
+    assert enriquecido_2["cliente_probable"] == "Roberto Gimenez Castro", "Debe completar el nombre con el de la lista de espera"
+    assert enriquecido_2["expediente_probable"] == "2026-099", "Debe rellenar el expediente del candidato de la lista de espera"
+    logger.info("✅ TEST 7 superado: coincidencia sin ambigüedad en la lista de espera enriquece la captura.")
+
+    # -------------------------------------------------------------------------
+    # 8. Enriquecimiento: sin teléfono conocido ni coincidencia -> se deja tal cual (sin inventar)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 8: sin coincidencia, no se toca nada ---")
+    datos_sin_match = {
+        "cliente_probable": "Persona Totalmente Desconocida", "area_probable": None, "asunto": "consulta",
+        "urgencia": None, "solicitud": None, "documentos_mencionados": None,
+        "servicio_sugerido": None, "expediente_probable": None, "confianza": 30
+    }
+    enriquecido_3 = captura_estructurada._enriquecer_con_datos_reales("34600007777", datos_sin_match)
+    assert enriquecido_3["cliente_probable"] == "Persona Totalmente Desconocida", "Sin coincidencia real, no debe inventar ni tocar el nombre"
+    assert enriquecido_3["expediente_probable"] is None
+    logger.info("✅ TEST 8 superado: sin coincidencia real, la captura no se modifica (no inventa datos).")
+
     logger.info("\n================================================================================")
     logger.info("       ✅ TODAS LAS PRUEBAS DE CAPTURA ESTRUCTURADA PASARON CORRECTAMENTE")
     logger.info("================================================================================")
@@ -101,6 +169,8 @@ async def run_tests():
     conn = database.get_connection()
     c = conn.cursor()
     c.execute("DELETE FROM capturas_estructuradas WHERE phone_number = ?", (TEL_TEST,))
+    c.execute("DELETE FROM clientes WHERE phone_number IN (?, ?)", (TEL_CLIENTE_REAL, TEL_DESCONOCIDO))
+    c.execute("DELETE FROM clientes_importados_pendientes WHERE nombre = ?", ("Roberto Gimenez Castro",))
     conn.commit()
     conn.close()
 
