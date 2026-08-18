@@ -32,6 +32,7 @@ import secretaria
 import captura_estructurada
 import rate_limiter
 import puente_claudia
+import telegram_handler
 
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
@@ -162,6 +163,18 @@ async def on_startup():
         logger.info(f"Programada revisión periódica de la carpeta puente cada {intervalo_puente} minutos.")
     except Exception as e:
         logger.error(f"Error programando la revisión de la carpeta puente: {e}")
+
+    # Bot de Telegram (canal de pruebas, en paralelo a WhatsApp). No bloqueante: initialize/
+    # start/start_polling se integran en el mismo bucle de eventos que usa uvicorn.
+    try:
+        await telegram_handler.iniciar_bot_telegram()
+    except Exception as e:
+        logger.error(f"Error iniciando el bot de Telegram: {e}")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await telegram_handler.detener_bot_telegram()
 
 
 @app.get("/")
