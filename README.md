@@ -133,7 +133,7 @@ asistente/
 
 ## 📊 Panel Visual
 
-Dashboard de solo lectura en `/panel` con el resumen de actividad de Maira: conversaciones (totales, hoy, últimos 7 días), tasa de autoresolución (conversaciones que no necesitaron escalado), clientes (totales, nuevos, pendientes de vincular teléfono), capturas estructuradas (totales, sin revisar, por urgencia), escalados a humano y actividad reciente de la [carpeta puente](#-carpeta-puente-maira--claudia--alberto).
+Dashboard de solo lectura en `/panel` con el resumen de actividad de Maira: conversaciones (totales, hoy, últimos 7 días), tasa de autoresolución (conversaciones que no necesitaron escalado), clientes (totales, nuevos, pendientes de vincular teléfono), capturas estructuradas (totales, sin revisar, por urgencia), escalados a humano y actividad reciente de la [carpeta puente](#-carpeta-puente-maira--claudia--alberto). Cada tarjeta y fila es un enlace: se puede entrar a `/panel/conversaciones` y pinchar cualquier cliente para ver su historial completo de mensajes, a `/panel/clientes` (filtrable por nuevos/activos) para ver la ficha completa y expedientes de cada uno, y a listas equivalentes de capturas, escalados y documentos.
 
 Protegido con **HTTP Basic Auth** — el navegador pide usuario (cualquiera vale, no se valida) y contraseña, que debe coincidir con `PANEL_PASSWORD` en el `.env`. Sin esa variable definida, `/panel` responde `503` en vez de exponer nada. Vive en el mismo servidor de Maira (no requiere infraestructura ni despliegue aparte); si más adelante se quiere en un subdominio propio del despacho, sería un paso de hosting/DNS aparte, no de código.
 
