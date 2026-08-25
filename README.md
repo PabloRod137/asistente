@@ -281,6 +281,17 @@ Un mensaje de texto por Telegram pasa por el **mismo** `procesar_flujo_mensaje` 
 
 ---
 
+## 🛠️ Alertas para el desarrollador
+
+Canal técnico separado del canal del cliente (`GESTOR_EMAIL`/`GESTOR_WHATSAPP`): avisa por email a `DEV_ALERT_EMAIL` de problemas de credenciales, no de nada relacionado con clientes o el negocio.
+
+- **Reactivo**: si falla la autenticación con Microsoft Graph, o WhatsApp responde 401/403 (token inválido o caducado), se envía un aviso inmediato con el detalle del error y dónde regenerar la credencial.
+- **Proactivo**: un job diario revisa `MS_CLIENT_SECRET_EXPIRA` (la fecha elegida al crear el secreto en Azure) y avisa 30 días antes de que caduque, y de nuevo si ya caducó.
+- Cada tipo de problema tiene un cooldown de 24h para no inundar el correo si el fallo se repite en cada petición durante una caída prolongada.
+- **Limitación conocida**: si el problema es precisamente que el correo (SMTP) está roto, esta alerta tampoco puede salir — se queda solo en el log del servidor.
+
+---
+
 ## ⚠️ Reconciliación tras Fallback Local (Nota Operativa)
 
 Si Microsoft Graph no está disponible (red, credenciales incorrectas, expiración, etc.), Maira activará de forma automática el **fallback local/SMTP/simulado**:

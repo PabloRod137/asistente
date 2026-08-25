@@ -66,7 +66,23 @@ class GraphAuthManager:
         now = time.time()
         if self._token and self._expires_at > now + 300:
             return self._token
-        return await asyncio.to_thread(self.get_token)
+        try:
+            return await asyncio.to_thread(self.get_token)
+        except Exception as e:
+            # Import diferido: alertas_desarrollador -> email_adapter -> graph_auth formaría un
+            # ciclo si se importara a nivel de módulo.
+            import alertas_desarrollador
+            await alertas_desarrollador.enviar_alerta_desarrollador(
+                clave="graph_auth_fallo",
+                asunto="Fallo de autenticación con Microsoft Graph",
+                mensaje=(
+                    f"No se pudo obtener un token de acceso de Microsoft Graph: {e}\n\n"
+                    "Revisa MS_CLIENT_ID, MS_CLIENT_SECRET y MS_TENANT_ID en el .env, y que "
+                    "el secreto no haya caducado (Azure Portal > Entra ID > App registrations "
+                    "> Maira > Certificates & secrets)."
+                )
+            )
+            raise
 
 # Instancia singleton para ser importada por otros adaptadores
 auth_manager = GraphAuthManager()

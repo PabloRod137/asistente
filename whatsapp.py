@@ -38,6 +38,19 @@ async def send_whatsapp_message(to_phone: str, message: str) -> bool:
         logger.error(f"Error enviando mensaje a WhatsApp ({to_phone}): {e}")
         if hasattr(e, 'response') and e.response is not None:
             logger.error(f"Detalles: {e.response.text}")
+            if e.response.status_code in (401, 403):
+                import alertas_desarrollador
+                await alertas_desarrollador.enviar_alerta_desarrollador(
+                    clave="whatsapp_token_invalido",
+                    asunto="El token de WhatsApp parece inválido o caducado",
+                    mensaje=(
+                        f"WhatsApp respondió {e.response.status_code} al intentar enviar un mensaje. "
+                        "Esto normalmente significa que WHATSAPP_TOKEN ha caducado o fue revocado.\n\n"
+                        f"Detalle: {e.response.text}\n\n"
+                        "Genera uno nuevo en Meta for Developers > tu app > WhatsApp > "
+                        "API Setup, y actualiza WHATSAPP_TOKEN en el .env."
+                    )
+                )
         return False
 
 async def download_whatsapp_media(media_id: str, dest_path: str) -> bool:

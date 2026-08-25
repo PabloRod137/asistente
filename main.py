@@ -34,6 +34,7 @@ import rate_limiter
 import puente_claudia
 import telegram_handler
 import panel
+import alertas_desarrollador
 
 scheduler = agenda.scheduler
 conversation_summary.set_scheduler(scheduler)
@@ -166,6 +167,19 @@ async def on_startup():
         logger.info(f"Programada revisión periódica de la carpeta puente cada {intervalo_puente} minutos.")
     except Exception as e:
         logger.error(f"Error programando la revisión de la carpeta puente: {e}")
+
+    # Aviso diario al desarrollador de credenciales a punto de caducar (ej. secreto de Graph)
+    try:
+        scheduler.add_job(
+            alertas_desarrollador.verificar_caducidades,
+            trigger="interval",
+            hours=24,
+            id="verificar_caducidades_credenciales",
+            replace_existing=True
+        )
+        logger.info("Programada revisión diaria de caducidad de credenciales para el desarrollador.")
+    except Exception as e:
+        logger.error(f"Error programando la revisión de caducidad de credenciales: {e}")
 
     # Bot de Telegram (canal de pruebas, en paralelo a WhatsApp). No bloqueante: initialize/
     # start/start_polling se integran en el mismo bucle de eventos que usa uvicorn.
