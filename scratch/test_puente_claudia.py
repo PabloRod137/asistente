@@ -158,6 +158,37 @@ async def run_tests():
     _limpiar()
 
 
+async def test_bloqueo_modo_sharepoint():
+    """
+    Salvaguarda: este modulo implementa el diseno previo al contrato aprobado con Claudia
+    (docs/CONTRATO_MAIRA_CLAUDIA_V4_APROBADO.md), que sigue con implementacion NO autorizada.
+    Si alguien activa STORAGE_TIPO=sharepoint sin haber migrado este modulo al formato V4,
+    debe bloquear en vez de escribir en SharePoint real con un formato no aprobado.
+    """
+    logger.info("\n--- TEST bloqueo: STORAGE_TIPO=sharepoint debe impedir escribir/leer ---")
+    valor_original = os.environ.get("STORAGE_TIPO")
+    os.environ["STORAGE_TIPO"] = "sharepoint"
+    try:
+        try:
+            await puente_claudia.enviar_a_carpeta_puente(TEL_TEST, b"contenido", "doc.pdf", "application/pdf")
+            assert False, "Debe lanzar RuntimeError en vez de escribir en SharePoint real"
+        except RuntimeError as e:
+            assert "no autorizado" in str(e).lower() or "no está autorizado" in str(e).lower()
+
+        try:
+            await puente_claudia.revisar_carpeta_salida()
+            assert False, "Debe lanzar RuntimeError en vez de leer de SharePoint real"
+        except RuntimeError:
+            pass
+    finally:
+        if valor_original is None:
+            os.environ.pop("STORAGE_TIPO", None)
+        else:
+            os.environ["STORAGE_TIPO"] = valor_original
+
+    logger.info("✅ Bloqueo superado: STORAGE_TIPO=sharepoint no permite usar el diseño no aprobado.")
+
+
 async def test_webhook_http():
     """
     Prueba a nivel HTTP real: un documento entrante a traves del endpoint /webhook, con firma
@@ -232,6 +263,7 @@ async def test_webhook_http():
 
 async def run_all():
     await run_tests()
+    await test_bloqueo_modo_sharepoint()
     await test_webhook_http()
 
 

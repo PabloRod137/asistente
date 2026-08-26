@@ -43,15 +43,32 @@ def _detectar_mime(nombre_archivo: str) -> str:
     return _MIME_POR_EXTENSION.get(ext, "application/octet-stream")
 
 
+def _verificar_modo_seguro():
+    """
+    Salvaguarda: este módulo implementa el diseño previo a la negociación de contrato con
+    Claudia (teléfono como clave, sin manifiesto/hash/inmutabilidad). No coincide con
+    docs/CONTRATO_MAIRA_CLAUDIA_V4_APROBADO.md, cuyo estado explícito es "IMPLEMENTACIÓN NO
+    AUTORIZADA / DATOS REALES NO AUTORIZADOS". Si alguien activa STORAGE_TIPO=sharepoint sin
+    haber migrado este módulo al formato del contrato V4, esto lo bloquea en vez de dejar que
+    Maira escriba en SharePoint real con un formato no aprobado.
+    """
+    if os.getenv("STORAGE_TIPO", "local").strip().lower() == "sharepoint":
+        raise RuntimeError(
+            "puente_claudia.py usa el diseño anterior al contrato aprobado con Claudia (ver "
+            "docs/CONTRATO_MAIRA_CLAUDIA_V4_APROBADO.md) y no está autorizado a escribir en "
+            "SharePoint real. Hay que migrar este módulo al contrato V4 antes de activar "
+            "STORAGE_TIPO=sharepoint."
+        )
+
+
 async def enviar_a_carpeta_puente(phone_number: str, contenido_bytes: bytes, nombre_archivo: str, mime_type: str = None) -> str:
     """
-    Sube un documento recibido de un cliente a la carpeta puente, para que Claudia (el agente
-    Microsoft 365 del despacho) lo recoja y lo procese. Ruta resultante:
-    {carpeta_puente}/{telefono}/entrada/{timestamp}_{nombre_archivo}
-    Usa storage_adapter, así que hoy escribe en disco local (STORAGE_TIPO=local) y en cuanto se
-    configure STORAGE_TIPO=sharepoint + credenciales de Graph, empieza a escribir en SharePoint
-    sin cambiar ni una línea de este módulo.
+    Sube un documento recibido de un cliente a la carpeta puente local de pruebas. NO es el
+    contrato aprobado con Claudia (ver _verificar_modo_seguro) -- mientras STORAGE_TIPO=local
+    esto es solo un mecanismo de pruebas internas, sin relación con la carpeta puente real.
+    Ruta resultante: {carpeta_puente}/{telefono}/entrada/{timestamp}_{nombre_archivo}
     """
+    _verificar_modo_seguro()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     nombre_seguro = _slug(nombre_archivo) or "documento"
     ruta_logica = f"{_carpeta_raiz()}/{phone_number}/entrada/{timestamp}_{nombre_seguro}"
@@ -102,6 +119,7 @@ async def revisar_carpeta_salida() -> int:
     cada archivo se registra en documentos_puente por su ruta_logica completa (UNIQUE), así que
     si el job se ejecuta de nuevo no reenvía lo que ya mandó.
     """
+    _verificar_modo_seguro()
     raiz = _carpeta_raiz()
     try:
         carpetas_clientes = await storage_adapter.listar_archivos(raiz)
