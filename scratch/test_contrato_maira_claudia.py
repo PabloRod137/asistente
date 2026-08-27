@@ -231,6 +231,49 @@ async def run_tests_async():
         assert len(f.read().strip()) == 64, "El acuse también debe tener su hash externo (SHA-256)"
     logger.info("✅ TEST 10 superado: acuse independiente, con su propio hash externo, sin tocar el paquete original.")
 
+    # -------------------------------------------------------------------------
+    # 11. Resolución de identidad: UNICO devuelve CLIENTE_ID, como operación aparte
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 11: resolución de identidad UNICO ---")
+    op_entrada = cmc.crear_operacion_entrada("34600009999", [("doc.pdf", b"x")])
+    cmc.crear_resolucion_identidad(op_entrada, "UNICO", cliente_id="323", expediente_id="245")
+    resolucion = cmc.leer_resolucion_identidad(op_entrada)
+    assert resolucion is not None
+    assert resolucion["RESULTADO"] == "UNICO"
+    assert resolucion["CLIENTE_ID"] == "323"
+    assert resolucion["OPERATION_ID"] != op_entrada, "La resolución debe ser una operación nueva, no editar la original"
+    logger.info("✅ TEST 11 superado.")
+
+    # -------------------------------------------------------------------------
+    # 12. AMBIGUO/NO_ENCONTRADO no llevan CLIENTE_ID -- Maira nunca elige por su cuenta
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 12: resultado AMBIGUO no lleva identidad ---")
+    op_entrada_2 = cmc.crear_operacion_entrada("34600008888", [("doc.pdf", b"y")])
+    cmc.crear_resolucion_identidad(op_entrada_2, "AMBIGUO")
+    resolucion_2 = cmc.leer_resolucion_identidad(op_entrada_2)
+    assert resolucion_2["RESULTADO"] == "AMBIGUO"
+    assert not resolucion_2["CLIENTE_ID"], "Un resultado AMBIGUO no debe traer un CLIENTE_ID adivinado"
+
+    try:
+        cmc.crear_resolucion_identidad("MAIRA-OTRA-OP", "AMBIGUO", cliente_id="999")
+        assert False, "No debe permitir CLIENTE_ID junto a un resultado que no sea UNICO"
+    except ValueError:
+        pass
+    logger.info("✅ TEST 12 superado: sin correspondencia inequívoca, nunca se inventa una identidad.")
+
+    # -------------------------------------------------------------------------
+    # 13. Sin caché: Maira no debe recordar nada entre operaciones distintas del mismo teléfono
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 13: sin asociación permanente teléfono→cliente ---")
+    # Un segundo mensaje del MISMO teléfono es una operación totalmente nueva y no arrastra
+    # ninguna resolución previa -- el contrato exige resolver de nuevo cada vez.
+    op_entrada_repetida = cmc.crear_operacion_entrada("34600009999", [("doc2.pdf", b"z")])
+    resolucion_repetida = cmc.leer_resolucion_identidad(op_entrada_repetida)
+    assert resolucion_repetida is None, "Una operación nueva no debe heredar la resolución de una operación anterior del mismo teléfono"
+    assert not hasattr(cmc, "_cache_identidad") and not hasattr(cmc, "_telefono_a_cliente"), \
+        "El módulo no debe tener ninguna estructura de caché teléfono->cliente"
+    logger.info("✅ TEST 13 superado: cada operación se resuelve de cero, sin memoria entre teléfonos.")
+
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
     logger.info("================================================================================")

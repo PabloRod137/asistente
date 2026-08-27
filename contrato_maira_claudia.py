@@ -171,6 +171,50 @@ def leer_operaciones_dirigidas_a_maira() -> list:
     return [p for p in _listar_todos_los_paquetes() if p.get("DIRECCION") == "CLAUDIA_A_MAIRA"]
 
 
+RESULTADOS_IDENTIDAD_VALIDOS = ("UNICO", "AMBIGUO", "NO_ENCONTRADO")
+
+
+def crear_resolucion_identidad(parent_operation_id: str, resultado: str, cliente_id: str = None,
+                                expediente_id: str = None) -> str:
+    """
+    Simula el lado de Claudia creando una RESOLUCION_IDENTIDAD -- existe en este prototipo
+    solo para poder probar cómo la consume Maira (ver leer_resolucion_identidad). En el sistema
+    real, quien crea esta operación es Claudia, nunca Maira.
+    """
+    if resultado not in RESULTADOS_IDENTIDAD_VALIDOS:
+        raise ValueError(f"RESULTADO inválido: {resultado}")
+    if resultado != "UNICO" and (cliente_id or expediente_id):
+        raise ValueError("Solo un resultado UNICO puede llevar CLIENTE_ID/EXPEDIENTE_ID")
+
+    operation_id = _generar_operation_id()
+    campos = {
+        "OPERATION_ID": operation_id,
+        "DIRECCION": "CLAUDIA_A_MAIRA",
+        "TIPO": "RESOLUCION_IDENTIDAD",
+        "PARENT_OPERATION_ID": parent_operation_id,
+        "CLIENTE_ID": cliente_id or "",
+        "RESULTADO": resultado,
+        "EXPEDIENTE_ID": expediente_id or "",
+    }
+    _escribir_paquete_atomico(operation_id, campos, [])
+    return operation_id
+
+
+def leer_resolucion_identidad(parent_operation_id: str) -> dict | None:
+    """
+    Busca la resolución de identidad para UNA operación concreta. Deliberadamente no cachea
+    nada entre llamadas -- cada consulta relee del almacén, y el resultado solo debe usarse
+    para la operación/conversación que lo originó (nunca se guarda como "el cliente de este
+    teléfono" para el futuro; el número puede cambiar de dueño, reciclarse o compartirse).
+    """
+    for paquete in _listar_todos_los_paquetes():
+        if (paquete.get("TIPO") == "RESOLUCION_IDENTIDAD"
+                and paquete.get("DIRECCION") == "CLAUDIA_A_MAIRA"
+                and paquete.get("PARENT_OPERATION_ID") == parent_operation_id):
+            return paquete
+    return None
+
+
 class EntregaBloqueada(Exception):
     pass
 
