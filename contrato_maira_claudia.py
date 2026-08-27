@@ -382,13 +382,23 @@ def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, mo
                              hash_paquete: str = None) -> str:
     """
     Registra una transición de estado como evento inmutable e independiente -- nunca mueve ni
-    edita el paquete original, ni ningún evento anterior. Retorna el EVENT_ID generado.
+    edita el paquete original, ni ningún evento anterior. Retorna el EVENT_ID (el del evento
+    nuevo, o el del ya existente si esta transición concreta ya se había registrado antes).
+
+    CLAVE_IDEMPOTENTE es determinista (operation_id + estado_nuevo), NO incluye el event_id --
+    un event_id aleatorio en la propia clave habría hecho que cada llamada generase una clave
+    distinta, incapaz de detectar nunca un reintento real. Si la última transición registrada ya
+    es exactamente este mismo estado_nuevo, no se crea un evento duplicado.
     """
     carpeta_op = _carpeta_estados_operacion(operation_id)
     anterior = _leer_todos_los_eventos(operation_id)
     ultimo = anterior[-1] if anterior else None
     hash_evento_anterior = ultimo["_hash_evento"] if ultimo else ""
     estado_anterior = ultimo["ESTADO_NUEVO"] if ultimo else ""
+
+    if ultimo and estado_anterior == estado_nuevo:
+        logger.info(f"Transición a '{estado_nuevo}' para {operation_id} ya registrada (evento {ultimo['EVENT_ID']}) -- no se duplica.")
+        return ultimo["EVENT_ID"]
 
     event_id = uuid.uuid4().hex[:12]
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
@@ -402,7 +412,7 @@ def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, mo
         "ACTOR": actor,
         "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "MOTIVO": motivo,
-        "CLAVE_IDEMPOTENTE": f"{operation_id}:{estado_nuevo}:{event_id}",
+        "CLAVE_IDEMPOTENTE": f"{operation_id}:{estado_nuevo}",
         "HASH_PAQUETE": hash_paquete or "",
         "HASH_EVENTO_ANTERIOR": hash_evento_anterior,
     }

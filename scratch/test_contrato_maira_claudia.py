@@ -322,6 +322,22 @@ async def run_tests_async():
     assert cmc.verificar_cadena_eventos(op_id_estado) is False, "Con un evento descartado, la cadena ya no es verificable"
     logger.info("✅ TEST 16 superado: un evento manipulado se descarta y rompe la verificación de la cadena completa.")
 
+    # -------------------------------------------------------------------------
+    # 17. Idempotencia real de la clave de evento: un reintento no debe duplicar la transición
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 17: CLAVE_IDEMPOTENTE es determinista y evita duplicados reales ---")
+    op_id_idem = cmc.crear_operacion_entrada("34600006666", [("doc.pdf", b"a")])
+    ev_a = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia")
+    # Reintento de la MISMA transición (ej. tras un timeout de red que en realidad sí se guardó)
+    ev_b = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia")
+    assert ev_a == ev_b, "Un reintento de la misma transición debe devolver el evento ya existente, no crear uno nuevo"
+
+    eventos_idem = cmc._leer_todos_los_eventos(op_id_idem)
+    assert len(eventos_idem) == 1, f"No debe haber duplicados en disco, hay {len(eventos_idem)}"
+    assert eventos_idem[0]["CLAVE_IDEMPOTENTE"] == f"{op_id_idem}:01_ORDENES_ACEPTADAS", \
+        "La clave idempotente debe ser determinista (sin el event_id aleatorio dentro)"
+    logger.info("✅ TEST 17 superado: reintentar la misma transición no duplica el evento.")
+
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
     logger.info("================================================================================")

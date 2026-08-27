@@ -44,6 +44,21 @@ leyendo el evento más reciente de la cadena. La cadena completa es verificable:
 se retira un evento intermedio, la verificación de la cadena falla de inmediato (probado con un
 test que manipula un evento y confirma que la cadena deja de verificar).
 
+`CLAVE_IDEMPOTENTE` es determinista (`{OPERATION_ID}:{ESTADO_NUEVO}`, sin el `EVENT_ID` dentro):
+si se reintenta registrar exactamente la misma transición, se devuelve el evento ya existente en
+vez de crear uno duplicado (probado).
+
+**Limitación abierta, no resuelta todavía**: el diseño actual asume que las transiciones de una
+misma operación las escribe un único actor a la vez. Si dos escrituras concurrentes para el
+*mismo* `OPERATION_ID` llegasen a producirse (ej. un fallo en el propio proceso de Claudia que
+lance dos workers para la misma operación), ambas podrían leer "sin evento anterior" al mismo
+tiempo y generar dos eventos que referencian el mismo `HASH_EVENTO_ANTERIOR` -- una bifurcación
+de la cadena, no detectada por la verificación actual (que solo comprueba el encadenamiento de
+cada evento con su predecesor, no la ausencia de bifurcaciones). Mientras las transiciones sigan
+siendo responsabilidad exclusiva de un único actor (Claudia, según el contrato ya aprobado), el
+riesgo es bajo, pero no está eliminado por diseño. Si se considera relevante, habría que añadir
+una comprobación explícita de bifurcaciones antes de dar esto por cerrado.
+
 ## 2. Plan de spike para la Opción A
 
 A ejecutar por alguien con acceso al centro de cumplimiento (Purview) del tenant de LexGuardian
