@@ -46,14 +46,29 @@ async def verificar_caducidades() -> None:
     Job diario: revisa credenciales con fecha de caducidad conocida (por ahora, el secreto de
     Microsoft Graph) y avisa con antelación antes de que dejen de funcionar.
     """
-    secreto_expira_str = os.getenv("MS_CLIENT_SECRET_EXPIRA")
+    secreto_expira_str = os.getenv("MS_CLIENT_SECRET_EXPIRA", "").strip()
     if not secreto_expira_str:
         return
 
-    try:
-        fecha_expira = datetime.strptime(secreto_expira_str, "%Y-%m-%d").date()
-    except ValueError:
-        logger.error(f"MS_CLIENT_SECRET_EXPIRA con formato inválido (se espera YYYY-MM-DD): {secreto_expira_str}")
+    fecha_expira = None
+    for formato in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            fecha_expira = datetime.strptime(secreto_expira_str, formato).date()
+            break
+        except ValueError:
+            continue
+
+    if fecha_expira is None:
+        logger.error(f"MS_CLIENT_SECRET_EXPIRA con formato irreconocible (se espera YYYY-MM-DD): '{secreto_expira_str}'")
+        await enviar_alerta_desarrollador(
+            clave="ms_client_secret_expira_formato_invalido",
+            asunto="MS_CLIENT_SECRET_EXPIRA tiene un formato que no puedo interpretar",
+            mensaje=(
+                f"El valor actual es '{secreto_expira_str}'. Corrígelo en el .env al formato "
+                "YYYY-MM-DD (ej. 2026-11-23) para que el aviso de caducidad funcione."
+            ),
+            cooldown_horas=24
+        )
         return
 
     dias_restantes = (fecha_expira - datetime.now().date()).days
