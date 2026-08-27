@@ -321,3 +321,127 @@ async def procesar_operacion_salida(paquete: dict, entregar_fn, max_intentos: in
 
     crear_acuse_entrega(operation_id, resultado_final, intentos, id_proveedor, estado_proveedor)
     return {"resultado": resultado_final, "intentos": intentos}
+
+
+# ---------------------------------------------------------------------------
+# Registro de transiciones de estado (PROPUESTA_BROKER_ACL_V2, corregida por Claudia a V3):
+# un paquete READY nunca se mueve ni se edita. Las transiciones de estado se registran como
+# eventos INDEPENDIENTES e INMUTABLES, nunca como líneas añadidas a un archivo compartido
+# (un .jsonl compartido fue rechazado explícitamente: riesgo real de concurrencia, corrupción
+# y pérdida de eventos si dos escritores tocan el mismo archivo a la vez). El "estado actual"
+# de una operación es siempre una PROYECCIÓN calculada leyendo la cadena de eventos -- nunca se
+# almacena como autoridad en un único sitio. Cada evento se encadena con el hash del evento
+# anterior, para que la cadena completa sea verificable, no solo cada evento por separado.
+# ---------------------------------------------------------------------------
+
+NOMBRE_CARPETA_ESTADOS = "ESTADOS"
+
+
+def _carpeta_estados() -> str:
+    return os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_ESTADOS)
+
+
+def _carpeta_estados_operacion(operation_id: str) -> str:
+    ruta = os.path.join(_carpeta_estados(), operation_id)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _leer_evento(ruta_json: str) -> dict | None:
+    """Retorna None si falta el hash o no verifica (evento incompleto o manipulado)."""
+    ruta_hash = ruta_json[:-5] + ".sha256"  # quita ".json", añade ".sha256"
+    if not os.path.exists(ruta_hash):
+        return None
+    with open(ruta_hash, "r", encoding="utf-8") as f:
+        hash_esperado = f.read().strip()
+    if _sha256_archivo(ruta_json) != hash_esperado:
+        logger.error(f"Hash de evento no coincide en {ruta_json} -- posible manipulación, se ignora.")
+        return None
+    with open(ruta_json, "r", encoding="utf-8") as f:
+        campos = _parsear_manifiesto(f.read())
+    campos["_hash_evento"] = hash_esperado
+    campos["_ruta"] = ruta_json
+    return campos
+
+
+def _leer_todos_los_eventos(operation_id: str) -> list:
+    """Eventos válidos de una operación, en orden cronológico (el nombre de archivo empieza por timestamp)."""
+    carpeta_op = os.path.join(_carpeta_estados(), operation_id)
+    if not os.path.isdir(carpeta_op):
+        return []
+    archivos_json = sorted(f for f in os.listdir(carpeta_op) if f.endswith(".json"))
+    eventos = []
+    for nombre in archivos_json:
+        evento = _leer_evento(os.path.join(carpeta_op, nombre))
+        if evento:
+            eventos.append(evento)
+    return eventos
+
+
+def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, motivo: str = "",
+                             hash_paquete: str = None) -> str:
+    """
+    Registra una transición de estado como evento inmutable e independiente -- nunca mueve ni
+    edita el paquete original, ni ningún evento anterior. Retorna el EVENT_ID generado.
+    """
+    carpeta_op = _carpeta_estados_operacion(operation_id)
+    anterior = _leer_todos_los_eventos(operation_id)
+    ultimo = anterior[-1] if anterior else None
+    hash_evento_anterior = ultimo["_hash_evento"] if ultimo else ""
+    estado_anterior = ultimo["ESTADO_NUEVO"] if ultimo else ""
+
+    event_id = uuid.uuid4().hex[:12]
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    nombre_base = f"{timestamp}_{event_id}"
+
+    campos = {
+        "EVENT_ID": event_id,
+        "OPERATION_ID": operation_id,
+        "ESTADO_ANTERIOR": estado_anterior,
+        "ESTADO_NUEVO": estado_nuevo,
+        "ACTOR": actor,
+        "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "MOTIVO": motivo,
+        "CLAVE_IDEMPOTENTE": f"{operation_id}:{estado_nuevo}:{event_id}",
+        "HASH_PAQUETE": hash_paquete or "",
+        "HASH_EVENTO_ANTERIOR": hash_evento_anterior,
+    }
+
+    texto = _serializar_manifiesto(campos)
+    ruta_parcial = os.path.join(carpeta_op, nombre_base + ".json.partial")
+    ruta_json = os.path.join(carpeta_op, nombre_base + ".json")
+    with open(ruta_parcial, "w", encoding="utf-8") as f:
+        f.write(texto)
+    os.replace(ruta_parcial, ruta_json)
+
+    hash_evento = _sha256_archivo(ruta_json)
+    with open(os.path.join(carpeta_op, nombre_base + ".sha256"), "w", encoding="utf-8") as f:
+        f.write(hash_evento)
+
+    logger.info(f"Evento {event_id} registrado para {operation_id}: {estado_anterior or '(inicio)'} -> {estado_nuevo}")
+    return event_id
+
+
+def obtener_estado_actual(operation_id: str) -> str | None:
+    """
+    El estado actual NUNCA se lee de un campo almacenado -- se calcula como proyección leyendo
+    el evento más reciente de la cadena. Si no hay eventos, retorna None (sin estado registrado).
+    """
+    eventos = _leer_todos_los_eventos(operation_id)
+    return eventos[-1]["ESTADO_NUEVO"] if eventos else None
+
+
+def verificar_cadena_eventos(operation_id: str) -> bool:
+    """
+    Comprueba que la cadena de eventos es consistente: cada evento debe referenciar
+    correctamente el hash del evento inmediatamente anterior (o cadena vacía si es el primero).
+    Si algún eslabón no encaja -- por ejemplo, un evento borrado o insertado fuera de orden --
+    la cadena completa se considera no verificable.
+    """
+    eventos = _leer_todos_los_eventos(operation_id)
+    hash_esperado_anterior = ""
+    for evento in eventos:
+        if evento["HASH_EVENTO_ANTERIOR"] != hash_esperado_anterior:
+            return False
+        hash_esperado_anterior = evento["_hash_evento"]
+    return True

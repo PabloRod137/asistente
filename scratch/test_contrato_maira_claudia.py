@@ -274,6 +274,54 @@ async def run_tests_async():
         "El módulo no debe tener ninguna estructura de caché teléfono->cliente"
     logger.info("✅ TEST 13 superado: cada operación se resuelve de cero, sin memoria entre teléfonos.")
 
+    # -------------------------------------------------------------------------
+    # 14. Registro de eventos: cada transición es un archivo independiente, no un log compartido
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 14: eventos de estado independientes, no un archivo compartido ---")
+    op_id_estado = cmc.crear_operacion_entrada("34600007777", [("doc.pdf", b"contenido")])
+    assert cmc.obtener_estado_actual(op_id_estado) is None, "Sin eventos todavía, no debe haber estado"
+
+    ev1 = cmc.registrar_evento_estado(op_id_estado, "01_ORDENES_ACEPTADAS", actor="Claudia", motivo="recibido")
+    assert cmc.obtener_estado_actual(op_id_estado) == "01_ORDENES_ACEPTADAS"
+
+    ev2 = cmc.registrar_evento_estado(op_id_estado, "04_ENTREGADAS", actor="Claudia", motivo="procesado")
+    assert cmc.obtener_estado_actual(op_id_estado) == "04_ENTREGADAS"
+
+    carpeta_op = cmc._carpeta_estados_operacion(op_id_estado)
+    archivos = os.listdir(carpeta_op)
+    assert sum(1 for a in archivos if a.endswith(".json")) == 2, "Cada transición debe ser un archivo .json independiente"
+    assert sum(1 for a in archivos if a.endswith(".sha256")) == 2, "Cada evento debe tener su propio hash externo"
+
+    # El paquete original de la entrada no se ha tocado en ningún momento
+    paquete_original = next(p for p in cmc._listar_todos_los_paquetes() if p["OPERATION_ID"] == op_id_estado)
+    assert paquete_original["ESTADO"] == "READY", "El paquete original nunca cambia, solo se leen eventos aparte"
+    logger.info("✅ TEST 14 superado: cada transición es un archivo independiente; el paquete original nunca se toca.")
+
+    # -------------------------------------------------------------------------
+    # 15. Cadena de hashes: la cadena verifica correctamente encadenada
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 15: verificación de la cadena de eventos ---")
+    assert cmc.verificar_cadena_eventos(op_id_estado) is True
+
+    eventos = cmc._leer_todos_los_eventos(op_id_estado)
+    assert eventos[0]["HASH_EVENTO_ANTERIOR"] == "", "El primer evento no tiene predecesor"
+    assert eventos[1]["HASH_EVENTO_ANTERIOR"] == eventos[0]["_hash_evento"], "El segundo evento debe encadenar el hash del primero"
+    logger.info("✅ TEST 15 superado: la cadena de eventos encadena correctamente cada hash con el anterior.")
+
+    # -------------------------------------------------------------------------
+    # 16. MANIPULACIÓN de un evento intermedio: se detecta y rompe la verificación de cadena
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 16: manipulación de un evento se detecta ---")
+    ruta_primer_evento = eventos[0]["_ruta"]
+    with open(ruta_primer_evento, "a", encoding="utf-8") as f:
+        f.write("CAMPO_INYECTADO: manipulado\n")
+
+    eventos_tras_manipular = cmc._leer_todos_los_eventos(op_id_estado)
+    assert len(eventos_tras_manipular) == 1, "El evento manipulado debe descartarse por completo, no leerse a medias"
+    assert eventos_tras_manipular[0]["EVENT_ID"] == ev2, "Solo debe sobrevivir el evento no manipulado"
+    assert cmc.verificar_cadena_eventos(op_id_estado) is False, "Con un evento descartado, la cadena ya no es verificable"
+    logger.info("✅ TEST 16 superado: un evento manipulado se descarta y rompe la verificación de la cadena completa.")
+
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
     logger.info("================================================================================")
