@@ -4,6 +4,7 @@ import shutil
 import asyncio
 import logging
 import tempfile
+import threading
 from datetime import datetime, timedelta
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -63,6 +64,15 @@ def run_tests_sync():
     with open(os.path.join(carpeta, "manifiesto.md"), encoding="utf-8") as f:
         assert "HASH_MANIFIESTO" not in f.read(), "El manifiesto no debe contener su propio hash (autorreferencia)"
     logger.info("✅ TEST 1 superado: paquete de entrada bien formado, identidad pendiente por defecto, hash externo.")
+
+    # -------------------------------------------------------------------------
+    # 1b. READY (sellado local) no es "accesible" hasta la confirmación real del mecanismo
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 1b: ventana de latencia entre READY y confirmación real ---")
+    assert cmc.paquete_accesible(op_id) is False, "Sin confirmación del mecanismo real, el paquete no debe considerarse accesible"
+    cmc.confirmar_sellado_real(op_id)
+    assert cmc.paquete_accesible(op_id) is True
+    logger.info("✅ TEST 1b superado: la confirmación real es un paso explícito y separado, nunca automático.")
 
     # -------------------------------------------------------------------------
     # 2. Entrada con cliente_id resuelto -> ESTADO_IDENTIDAD: RESUELTA
@@ -281,10 +291,10 @@ async def run_tests_async():
     op_id_estado = cmc.crear_operacion_entrada("34600007777", [("doc.pdf", b"contenido")])
     assert cmc.obtener_estado_actual(op_id_estado) is None, "Sin eventos todavía, no debe haber estado"
 
-    ev1 = cmc.registrar_evento_estado(op_id_estado, "01_ORDENES_ACEPTADAS", actor="Claudia", motivo="recibido")
+    ev1 = cmc.registrar_evento_estado(op_id_estado, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cmd-001", motivo="recibido")
     assert cmc.obtener_estado_actual(op_id_estado) == "01_ORDENES_ACEPTADAS"
 
-    ev2 = cmc.registrar_evento_estado(op_id_estado, "04_ENTREGADAS", actor="Claudia", motivo="procesado")
+    ev2 = cmc.registrar_evento_estado(op_id_estado, "04_ENTREGADAS", actor="Claudia", comando_id="cmd-002", motivo="procesado")
     assert cmc.obtener_estado_actual(op_id_estado) == "04_ENTREGADAS"
 
     carpeta_op = cmc._carpeta_estados_operacion(op_id_estado)
@@ -292,51 +302,140 @@ async def run_tests_async():
     assert sum(1 for a in archivos if a.endswith(".json")) == 2, "Cada transición debe ser un archivo .json independiente"
     assert sum(1 for a in archivos if a.endswith(".sha256")) == 2, "Cada evento debe tener su propio hash externo"
 
-    # El paquete original de la entrada no se ha tocado en ningún momento
     paquete_original = next(p for p in cmc._listar_todos_los_paquetes() if p["OPERATION_ID"] == op_id_estado)
     assert paquete_original["ESTADO"] == "READY", "El paquete original nunca cambia, solo se leen eventos aparte"
     logger.info("✅ TEST 14 superado: cada transición es un archivo independiente; el paquete original nunca se toca.")
 
     # -------------------------------------------------------------------------
-    # 15. Cadena de hashes: la cadena verifica correctamente encadenada
+    # 15. Cadena de hashes encadenada correctamente, con SECUENCIA monotónica
     # -------------------------------------------------------------------------
     logger.info("\n--- TEST 15: verificación de la cadena de eventos ---")
     assert cmc.verificar_cadena_eventos(op_id_estado) is True
 
     eventos = cmc._leer_todos_los_eventos(op_id_estado)
+    assert eventos[0]["SECUENCIA"] == "0" and eventos[1]["SECUENCIA"] == "1", "La secuencia debe ser monótona empezando en 0"
     assert eventos[0]["HASH_EVENTO_ANTERIOR"] == "", "El primer evento no tiene predecesor"
     assert eventos[1]["HASH_EVENTO_ANTERIOR"] == eventos[0]["_hash_evento"], "El segundo evento debe encadenar el hash del primero"
-    logger.info("✅ TEST 15 superado: la cadena de eventos encadena correctamente cada hash con el anterior.")
+    logger.info("✅ TEST 15 superado: secuencia monótona y cadena de hashes correctamente encadenada.")
 
     # -------------------------------------------------------------------------
-    # 16. MANIPULACIÓN de un evento intermedio: se detecta y rompe la verificación de cadena
+    # 16. MANIPULACIÓN de un evento intermedio: se detecta y bloquea la proyección del estado
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 16: manipulación de un evento se detecta ---")
+    logger.info("\n--- TEST 16: manipulación de un evento bloquea la proyección ---")
     ruta_primer_evento = eventos[0]["_ruta"]
     with open(ruta_primer_evento, "a", encoding="utf-8") as f:
         f.write("CAMPO_INYECTADO: manipulado\n")
 
-    eventos_tras_manipular = cmc._leer_todos_los_eventos(op_id_estado)
-    assert len(eventos_tras_manipular) == 1, "El evento manipulado debe descartarse por completo, no leerse a medias"
-    assert eventos_tras_manipular[0]["EVENT_ID"] == ev2, "Solo debe sobrevivir el evento no manipulado"
-    assert cmc.verificar_cadena_eventos(op_id_estado) is False, "Con un evento descartado, la cadena ya no es verificable"
-    logger.info("✅ TEST 16 superado: un evento manipulado se descarta y rompe la verificación de la cadena completa.")
+    assert cmc.verificar_cadena_eventos(op_id_estado) is False, "Con un evento manipulado, la cadena ya no es verificable"
+    try:
+        cmc.obtener_estado_actual(op_id_estado)
+        assert False, "obtener_estado_actual debe bloquear (lanzar excepción), nunca devolver un estado no fiable"
+    except cmc.CadenaEventosInvalida:
+        pass
+    logger.info("✅ TEST 16 superado: un evento manipulado bloquea la proyección del estado, no la deja pasar en silencio.")
 
     # -------------------------------------------------------------------------
-    # 17. Idempotencia real de la clave de evento: un reintento no debe duplicar la transición
+    # 17. Idempotencia por comando de origen: repetir el MISMO comando no duplica
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 17: CLAVE_IDEMPOTENTE es determinista y evita duplicados reales ---")
+    logger.info("\n--- TEST 17: idempotencia por comando_id, no por estado destino ---")
     op_id_idem = cmc.crear_operacion_entrada("34600006666", [("doc.pdf", b"a")])
-    ev_a = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia")
-    # Reintento de la MISMA transición (ej. tras un timeout de red que en realidad sí se guardó)
-    ev_b = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia")
-    assert ev_a == ev_b, "Un reintento de la misma transición debe devolver el evento ya existente, no crear uno nuevo"
+    ev_a = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cmd-idem-1")
+    ev_b = cmc.registrar_evento_estado(op_id_idem, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cmd-idem-1")
+    assert ev_a == ev_b, "Reintentar el mismo comando_id debe devolver el evento ya existente, no crear uno nuevo"
+    assert len(cmc._leer_todos_los_eventos(op_id_idem)) == 1, "No debe haber duplicados en disco"
 
-    eventos_idem = cmc._leer_todos_los_eventos(op_id_idem)
-    assert len(eventos_idem) == 1, f"No debe haber duplicados en disco, hay {len(eventos_idem)}"
-    assert eventos_idem[0]["CLAVE_IDEMPOTENTE"] == f"{op_id_idem}:01_ORDENES_ACEPTADAS", \
-        "La clave idempotente debe ser determinista (sin el event_id aleatorio dentro)"
-    logger.info("✅ TEST 17 superado: reintentar la misma transición no duplica el evento.")
+    try:
+        cmc.registrar_evento_estado(op_id_idem, "03_BLOQUEADAS", actor="Claudia", comando_id="cmd-idem-1")
+        assert False, "El mismo comando_id con un estado distinto debe rechazarse como conflicto"
+    except ValueError:
+        pass
+    logger.info("✅ TEST 17 superado: repetir el mismo comando no duplica; el mismo comando con otro estado se rechaza como conflicto.")
+
+    # -------------------------------------------------------------------------
+    # 18. Repetición LEGÍTIMA de un mismo estado con comandos distintos -- SÍ debe permitirse
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 18: EJECUCIÓN->BLOQUEADA->EJECUCIÓN->BLOQUEADA es legítimo ---")
+    op_id_repeticion = cmc.crear_operacion_entrada("34600005555", [("doc.pdf", b"b")])
+    cmc.registrar_evento_estado(op_id_repeticion, "02_EN_EJECUCION", actor="Claudia", comando_id="c1")
+    cmc.registrar_evento_estado(op_id_repeticion, "03_BLOQUEADAS", actor="Claudia", comando_id="c2", motivo="falta documento")
+    cmc.registrar_evento_estado(op_id_repeticion, "02_EN_EJECUCION", actor="Claudia", comando_id="c3", motivo="documento recibido")
+    cmc.registrar_evento_estado(op_id_repeticion, "03_BLOQUEADAS", actor="Claudia", comando_id="c4", motivo="otro motivo distinto")
+
+    eventos_repeticion = cmc._leer_todos_los_eventos(op_id_repeticion)
+    assert len(eventos_repeticion) == 4, "Los cuatro comandos son distintos -- ninguno debe descartarse como duplicado"
+    assert cmc.obtener_estado_actual(op_id_repeticion) == "03_BLOQUEADAS"
+    assert cmc.verificar_cadena_eventos(op_id_repeticion) is True
+    logger.info("✅ TEST 18 superado: un estado puede revisitarse legítimamente varias veces con comandos distintos.")
+
+    # -------------------------------------------------------------------------
+    # 19. Bifurcación real: dos escrituras "concurrentes" no pueden reclamar la misma secuencia
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 19: la reclamación atómica de secuencia impide la bifurcación ---")
+    op_id_bifurcacion = cmc.crear_operacion_entrada("34600004444", [("doc.pdf", b"c")])
+    n1 = cmc._reclamar_secuencia(op_id_bifurcacion)
+    n2 = cmc._reclamar_secuencia(op_id_bifurcacion)
+    assert n1 != n2, "Dos reclamaciones consecutivas nunca deben obtener el mismo número de secuencia"
+    assert n2 == n1 + 1
+    logger.info("✅ TEST 19 superado: la reclamación de secuencia es realmente exclusiva (compare-and-swap vía O_CREAT|O_EXCL).")
+
+    # -------------------------------------------------------------------------
+    # 19b. Lo mismo, pero con CONCURRENCIA REAL (hilos de verdad, no llamadas secuenciales) --
+    # mismo patrón ya usado en este proyecto para probar la condición de carrera de
+    # promover_cliente_pendiente. Es la prueba que de verdad exige Claudia, no una aproximación.
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 19b: 20 hilos reales reclamando secuencia para la MISMA operación ---")
+    op_id_concurrencia = cmc.crear_operacion_entrada("34600002222", [("doc.pdf", b"e")])
+    secuencias_obtenidas = []
+    errores_hilo = []
+    lock_resultados = threading.Lock()
+
+    def _reclamar_en_hilo():
+        try:
+            n = cmc._reclamar_secuencia(op_id_concurrencia)
+            with lock_resultados:
+                secuencias_obtenidas.append(n)
+        except Exception as e:
+            with lock_resultados:
+                errores_hilo.append(e)
+
+    hilos = [threading.Thread(target=_reclamar_en_hilo) for _ in range(20)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+
+    assert not errores_hilo, f"Ningún hilo debe fallar: {errores_hilo}"
+    assert len(secuencias_obtenidas) == 20
+    assert len(set(secuencias_obtenidas)) == 20, f"20 hilos concurrentes deben obtener 20 números de secuencia DISTINTOS, se obtuvieron {sorted(secuencias_obtenidas)}"
+    assert sorted(secuencias_obtenidas) == list(range(20)), "Las secuencias reclamadas deben cubrir 0..19 sin huecos ni repeticiones"
+    logger.info("✅ TEST 19b superado: 20 hilos concurrentes reales, cero colisiones, cero huecos -- la exclusión mutua es real, no una convención.")
+
+    # -------------------------------------------------------------------------
+    # 20. Borrado del último evento: se detecta como hueco (el .claim sobrevive, el .json no)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 20: borrado del último evento se detecta como hueco ---")
+    op_id_borrado = cmc.crear_operacion_entrada("34600003333", [("doc.pdf", b"d")])
+    cmc.registrar_evento_estado(op_id_borrado, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="d1")
+    ultimo_evento = cmc.registrar_evento_estado(op_id_borrado, "04_ENTREGADAS", actor="Claudia", comando_id="d2")
+
+    assert cmc.verificar_cadena_eventos(op_id_borrado) is True
+
+    eventos_borrado = cmc._leer_todos_los_eventos(op_id_borrado)
+    ruta_ultimo = next(e["_ruta"] for e in eventos_borrado if e["EVENT_ID"] == ultimo_evento)
+    ruta_hash_ultimo = ruta_ultimo[:-5] + ".sha256"
+    os.remove(ruta_ultimo)
+    os.remove(ruta_hash_ultimo)
+    # El .claim de esa secuencia sigue existiendo -- eso es justo lo que delata el borrado.
+
+    diagnostico = cmc.diagnosticar_cadena_eventos(op_id_borrado)
+    assert diagnostico["valida"] is False
+    assert diagnostico["ultimo_evento_ausente"] is True, "Debe detectar específicamente que el evento de mayor secuencia reclamada ha desaparecido"
+    try:
+        cmc.obtener_estado_actual(op_id_borrado)
+        assert False
+    except cmc.CadenaEventosInvalida:
+        pass
+    logger.info("✅ TEST 20 superado: borrar el último evento (sin borrar su reclamación de secuencia) se detecta y bloquea la proyección.")
 
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")

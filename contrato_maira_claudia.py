@@ -77,7 +77,12 @@ def _escribir_paquete_atomico(operation_id: str, campos: dict, archivos: list) -
     finalizado). Un paquete a medio escribir nunca aparenta estar completo ni se procesa.
     """
     carpeta_paquete = os.path.join(_carpeta_nuevas(), operation_id)
-    os.makedirs(carpeta_paquete, exist_ok=True)
+    try:
+        os.makedirs(carpeta_paquete)  # exist_ok=False a propósito: un READY nunca admite dos escrituras
+    except FileExistsError:
+        raise RuntimeError(
+            f"Ya existe un paquete para {operation_id} -- un paquete READY nunca admite una segunda escritura."
+        )
 
     lista_archivos = []
     for nombre_archivo, contenido in archivos:
@@ -105,6 +110,31 @@ def _escribir_paquete_atomico(operation_id: str, campos: dict, archivos: list) -
 
     logger.info(f"Paquete {operation_id} cerrado (READY) en {carpeta_paquete}")
     return carpeta_paquete
+
+
+def confirmar_sellado_real(operation_id: str) -> None:
+    """
+    READY (sellado local, contenido completo + hash) no es lo mismo que "protegido de verdad"
+    -- con la Opción A (etiquetas de retención), hay una ventana de latencia real entre marcar
+    READY y que Microsoft aplique el bloqueo efectivo. Durante esa ventana, el paquete debe
+    tratarse como inaccesible. En este prototipo, la confirmación es un marcador aparte que
+    debería activarse solo tras una señal real del mecanismo elegido (respuesta de la API de
+    etiquetado, webhook de Purview, etc.) -- aquí se deja como llamada explícita separada, nunca
+    automática al crear el paquete, precisamente para que nadie la dé por hecha sin esa señal.
+    """
+    carpeta_paquete = os.path.join(_carpeta_nuevas(), operation_id)
+    ruta_confirmacion = os.path.join(carpeta_paquete, "sellado_confirmado.marker")
+    with open(ruta_confirmacion, "w", encoding="utf-8") as f:
+        f.write(datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def paquete_accesible(operation_id: str) -> bool:
+    """
+    False durante la ventana de latencia entre READY y la confirmación real del mecanismo de
+    inmutabilidad. Ni Maira ni Claudia deberían actuar sobre un paquete todavía no confirmado.
+    """
+    carpeta_paquete = os.path.join(_carpeta_nuevas(), operation_id)
+    return os.path.exists(os.path.join(carpeta_paquete, "sellado_confirmado.marker"))
 
 
 def _leer_paquete(carpeta_paquete: str) -> dict | None:
@@ -324,17 +354,34 @@ async def procesar_operacion_salida(paquete: dict, entregar_fn, max_intentos: in
 
 
 # ---------------------------------------------------------------------------
-# Registro de transiciones de estado (PROPUESTA_BROKER_ACL_V2, corregida por Claudia a V3):
+# Registro de transiciones de estado (V4, corregida por Claudia sobre V3):
 # un paquete READY nunca se mueve ni se edita. Las transiciones de estado se registran como
-# eventos INDEPENDIENTES e INMUTABLES, nunca como líneas añadidas a un archivo compartido
-# (un .jsonl compartido fue rechazado explícitamente: riesgo real de concurrencia, corrupción
-# y pérdida de eventos si dos escritores tocan el mismo archivo a la vez). El "estado actual"
-# de una operación es siempre una PROYECCIÓN calculada leyendo la cadena de eventos -- nunca se
-# almacena como autoridad en un único sitio. Cada evento se encadena con el hash del evento
-# anterior, para que la cadena completa sea verificable, no solo cada evento por separado.
+# eventos INDEPENDIENTES e INMUTABLES (nunca líneas de un archivo compartido). Correcciones V4:
+#
+# 1. Bifurcación: se impide por diseño, no por convención de "un solo actor". Cada evento
+#    reclama un número de SECUENCIA mediante creación exclusiva de archivo (O_CREAT|O_EXCL),
+#    que el sistema de archivos garantiza atómica -- es la primitiva compare-and-swap real.
+# 2. Idempotencia: la clave identifica el COMANDO/intento de origen (comando_id), no el estado
+#    destino -- un mismo estado puede visitarse legítimamente varias veces
+#    (EJECUCIÓN->BLOQUEADA->EJECUCIÓN->BLOQUEADA); solo reintentar el mismo comando_id es un
+#    duplicado real.
+# 3. Orden: SECUENCIA monotónica asignada atómicamente, no el timestamp (que no garantiza orden
+#    único). El diagnóstico de la cadena detecta huecos (secuencia reclamada sin evento válido)
+#    y bifurcaciones (por si alguien saltó la reclamación atómica escribiendo a mano).
+# 4. Borrado del último evento: la reclamación de secuencia (.claim) es un artefacto
+#    INDEPENDIENTE del contenido del evento (.json/.sha256). Si se borra el evento pero no su
+#    claim, se detecta como hueco en la posición más alta. No protege contra un atacante que
+#    borre AMBOS -- eso requiere un anclaje externo cruzado con el lado de Claudia, fuera del
+#    alcance de lo que el código de Maira puede garantizar en solitario (ver
+#    PROPUESTA_BROKER_ACL_V4.md).
 # ---------------------------------------------------------------------------
 
 NOMBRE_CARPETA_ESTADOS = "ESTADOS"
+SUBCARPETA_SECUENCIA = "_secuencia"
+
+
+class CadenaEventosInvalida(Exception):
+    pass
 
 
 def _carpeta_estados() -> str:
@@ -345,6 +392,39 @@ def _carpeta_estados_operacion(operation_id: str) -> str:
     ruta = os.path.join(_carpeta_estados(), operation_id)
     os.makedirs(ruta, exist_ok=True)
     return ruta
+
+
+def _carpeta_secuencia_operacion(operation_id: str) -> str:
+    ruta = os.path.join(_carpeta_estados_operacion(operation_id), SUBCARPETA_SECUENCIA)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _reclamar_secuencia(operation_id: str, max_reintentos: int = 200) -> int:
+    """
+    Reclama atómicamente el siguiente número de secuencia. La creación exclusiva de archivo
+    (O_CREAT|O_EXCL) es la primitiva compare-and-swap: si dos escritores intentan reclamar el
+    mismo número a la vez, el sistema de archivos garantiza que solo uno tiene éxito -- el otro
+    falla con FileExistsError y reintenta con el siguiente número. Esto es lo que impide una
+    bifurcación silenciosa, no una convención de "solo escribe un actor a la vez".
+    """
+    carpeta_seq = _carpeta_secuencia_operacion(operation_id)
+    existentes = [int(f[:-6]) for f in os.listdir(carpeta_seq) if f.endswith(".claim")]
+    n = (max(existentes) + 1) if existentes else 0
+    for _ in range(max_reintentos):
+        ruta_claim = os.path.join(carpeta_seq, f"{n:010d}.claim")
+        try:
+            fd = os.open(ruta_claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return n
+        except FileExistsError:
+            n += 1
+    raise RuntimeError(f"No se pudo reclamar secuencia para {operation_id} tras {max_reintentos} intentos")
+
+
+def _secuencias_reclamadas(operation_id: str) -> set:
+    carpeta_seq = _carpeta_secuencia_operacion(operation_id)
+    return {int(f[:-6]) for f in os.listdir(carpeta_seq) if f.endswith(".claim")}
 
 
 def _leer_evento(ruta_json: str) -> dict | None:
@@ -364,55 +444,108 @@ def _leer_evento(ruta_json: str) -> dict | None:
     return campos
 
 
-def _leer_todos_los_eventos(operation_id: str) -> list:
-    """Eventos válidos de una operación, en orden cronológico (el nombre de archivo empieza por timestamp)."""
+def _leer_eventos_por_secuencia(operation_id: str) -> dict:
+    """{numero_secuencia: evento} -- solo eventos con hash válido y campo SECUENCIA numérico."""
     carpeta_op = os.path.join(_carpeta_estados(), operation_id)
     if not os.path.isdir(carpeta_op):
-        return []
-    archivos_json = sorted(f for f in os.listdir(carpeta_op) if f.endswith(".json"))
-    eventos = []
-    for nombre in archivos_json:
+        return {}
+    eventos = {}
+    for nombre in os.listdir(carpeta_op):
+        if not nombre.endswith(".json"):
+            continue
         evento = _leer_evento(os.path.join(carpeta_op, nombre))
-        if evento:
-            eventos.append(evento)
+        if evento and evento.get("SECUENCIA", "").isdigit():
+            eventos[int(evento["SECUENCIA"])] = evento
     return eventos
 
 
-def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, motivo: str = "",
-                             hash_paquete: str = None) -> str:
-    """
-    Registra una transición de estado como evento inmutable e independiente -- nunca mueve ni
-    edita el paquete original, ni ningún evento anterior. Retorna el EVENT_ID (el del evento
-    nuevo, o el del ya existente si esta transición concreta ya se había registrado antes).
+def _leer_todos_los_eventos(operation_id: str) -> list:
+    """Eventos válidos de una operación, en orden de SECUENCIA (no de timestamp)."""
+    eventos_por_seq = _leer_eventos_por_secuencia(operation_id)
+    return [eventos_por_seq[n] for n in sorted(eventos_por_seq.keys())]
 
-    CLAVE_IDEMPOTENTE es determinista (operation_id + estado_nuevo), NO incluye el event_id --
-    un event_id aleatorio en la propia clave habría hecho que cada llamada generase una clave
-    distinta, incapaz de detectar nunca un reintento real. Si la última transición registrada ya
-    es exactamente este mismo estado_nuevo, no se crea un evento duplicado.
+
+def diagnosticar_cadena_eventos(operation_id: str) -> dict:
     """
-    carpeta_op = _carpeta_estados_operacion(operation_id)
-    anterior = _leer_todos_los_eventos(operation_id)
-    ultimo = anterior[-1] if anterior else None
+    Diagnóstico explícito de la cadena -- no un simple booleano. Distingue huecos (secuencia
+    reclamada sin evento válido correspondiente, indicando borrado o escritura incompleta),
+    ruptura del encadenamiento de hashes, y si el evento de la secuencia más alta reclamada ha
+    desaparecido (posible borrado del último evento).
+    """
+    reclamadas = _secuencias_reclamadas(operation_id)
+    eventos_por_seq = _leer_eventos_por_secuencia(operation_id)
+
+    if not reclamadas:
+        return {"valida": True, "huecos": [], "cadena_rota": False, "ultimo_evento_ausente": False, "eventos": []}
+
+    huecos = sorted(n for n in reclamadas if n not in eventos_por_seq)
+    eventos_ordenados = [eventos_por_seq[n] for n in sorted(eventos_por_seq.keys())]
+
+    cadena_rota = False
+    hash_esperado_anterior = ""
+    for evento in eventos_ordenados:
+        if evento["HASH_EVENTO_ANTERIOR"] != hash_esperado_anterior:
+            cadena_rota = True
+            break
+        hash_esperado_anterior = evento["_hash_evento"]
+
+    ultimo_evento_ausente = max(reclamadas) not in eventos_por_seq
+
+    return {
+        "valida": (not huecos) and (not cadena_rota) and (not ultimo_evento_ausente),
+        "huecos": huecos,
+        "cadena_rota": cadena_rota,
+        "ultimo_evento_ausente": ultimo_evento_ausente,
+        "eventos": eventos_ordenados,
+    }
+
+
+def verificar_cadena_eventos(operation_id: str) -> bool:
+    """Versión booleana de diagnosticar_cadena_eventos, para el caso común."""
+    return diagnosticar_cadena_eventos(operation_id)["valida"]
+
+
+def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, comando_id: str,
+                             motivo: str = "", hash_paquete: str = None) -> str:
+    """
+    Registra una transición de estado como evento inmutable e independiente. `comando_id`
+    identifica el comando/intento que origina la transición (no el estado destino): permite que
+    un mismo estado se visite legítimamente varias veces, mientras que reintentar EXACTAMENTE el
+    mismo comando_id devuelve el evento ya existente en vez de duplicarlo. Un comando_id repetido
+    con un estado_nuevo distinto se rechaza como conflicto, no como reintento legítimo.
+    """
+    eventos_existentes = _leer_eventos_por_secuencia(operation_id)
+    for evento in eventos_existentes.values():
+        if evento.get("CLAVE_IDEMPOTENTE") == comando_id:
+            if evento["ESTADO_NUEVO"] != estado_nuevo:
+                raise ValueError(
+                    f"comando_id '{comando_id}' ya se procesó con un estado distinto "
+                    f"({evento['ESTADO_NUEVO']} != {estado_nuevo}) -- conflicto, no reintento legítimo"
+                )
+            logger.info(f"comando_id '{comando_id}' ya procesado (evento {evento['EVENT_ID']}) -- no se duplica.")
+            return evento["EVENT_ID"]
+
+    secuencia = _reclamar_secuencia(operation_id)
+    eventos_ordenados = [eventos_existentes[n] for n in sorted(eventos_existentes.keys())]
+    ultimo = eventos_ordenados[-1] if eventos_ordenados else None
     hash_evento_anterior = ultimo["_hash_evento"] if ultimo else ""
     estado_anterior = ultimo["ESTADO_NUEVO"] if ultimo else ""
 
-    if ultimo and estado_anterior == estado_nuevo:
-        logger.info(f"Transición a '{estado_nuevo}' para {operation_id} ya registrada (evento {ultimo['EVENT_ID']}) -- no se duplica.")
-        return ultimo["EVENT_ID"]
-
+    carpeta_op = _carpeta_estados_operacion(operation_id)
     event_id = uuid.uuid4().hex[:12]
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-    nombre_base = f"{timestamp}_{event_id}"
+    nombre_base = f"{secuencia:010d}_{timestamp}_{event_id}"
 
     campos = {
         "EVENT_ID": event_id,
         "OPERATION_ID": operation_id,
+        "SECUENCIA": str(secuencia),
         "ESTADO_ANTERIOR": estado_anterior,
         "ESTADO_NUEVO": estado_nuevo,
         "ACTOR": actor,
         "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "MOTIVO": motivo,
-        "CLAVE_IDEMPOTENTE": f"{operation_id}:{estado_nuevo}",
+        "CLAVE_IDEMPOTENTE": comando_id,
         "HASH_PAQUETE": hash_paquete or "",
         "HASH_EVENTO_ANTERIOR": hash_evento_anterior,
     }
@@ -428,30 +561,23 @@ def registrar_evento_estado(operation_id: str, estado_nuevo: str, actor: str, mo
     with open(os.path.join(carpeta_op, nombre_base + ".sha256"), "w", encoding="utf-8") as f:
         f.write(hash_evento)
 
-    logger.info(f"Evento {event_id} registrado para {operation_id}: {estado_anterior or '(inicio)'} -> {estado_nuevo}")
+    logger.info(f"Evento {event_id} (secuencia {secuencia}) registrado para {operation_id}: {estado_anterior or '(inicio)'} -> {estado_nuevo}")
     return event_id
 
 
 def obtener_estado_actual(operation_id: str) -> str | None:
     """
-    El estado actual NUNCA se lee de un campo almacenado -- se calcula como proyección leyendo
-    el evento más reciente de la cadena. Si no hay eventos, retorna None (sin estado registrado).
+    El estado actual NUNCA se lee de un campo almacenado -- se calcula como proyección de la
+    cadena de eventos. Si no hay eventos, retorna None. Si la cadena no es fiable (hueco,
+    bifurcación, o el último evento ha desaparecido), se BLOQUEA la proyección lanzando
+    CadenaEventosInvalida en vez de arriesgarse a devolver un estado desactualizado o manipulado.
     """
-    eventos = _leer_todos_los_eventos(operation_id)
-    return eventos[-1]["ESTADO_NUEVO"] if eventos else None
-
-
-def verificar_cadena_eventos(operation_id: str) -> bool:
-    """
-    Comprueba que la cadena de eventos es consistente: cada evento debe referenciar
-    correctamente el hash del evento inmediatamente anterior (o cadena vacía si es el primero).
-    Si algún eslabón no encaja -- por ejemplo, un evento borrado o insertado fuera de orden --
-    la cadena completa se considera no verificable.
-    """
-    eventos = _leer_todos_los_eventos(operation_id)
-    hash_esperado_anterior = ""
-    for evento in eventos:
-        if evento["HASH_EVENTO_ANTERIOR"] != hash_esperado_anterior:
-            return False
-        hash_esperado_anterior = evento["_hash_evento"]
-    return True
+    diagnostico = diagnosticar_cadena_eventos(operation_id)
+    if not diagnostico["eventos"]:
+        return None
+    if not diagnostico["valida"]:
+        raise CadenaEventosInvalida(
+            f"Cadena de eventos de {operation_id} no es fiable: huecos={diagnostico['huecos']}, "
+            f"cadena_rota={diagnostico['cadena_rota']}, ultimo_evento_ausente={diagnostico['ultimo_evento_ausente']}"
+        )
+    return diagnostico["eventos"][-1]["ESTADO_NUEVO"]
