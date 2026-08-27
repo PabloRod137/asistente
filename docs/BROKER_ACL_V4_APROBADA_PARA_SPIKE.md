@@ -1,8 +1,31 @@
-# PROPUESTA_BROKER_ACL_MAIRA_CLAUDIA_V4
+# BROKER_ACL_MAIRA_CLAUDIA_V4 -- APROBADA COMO BASE DEL SPIKE
 
 ## Estado
-V4 -- incorpora los 4 cierres obligatorios sobre V3 y las 6 correcciones sobre el spike de la
-Opción A. Pendiente de validación. No implementado en producción, sin datos reales.
+**APROBADA como diseño de prototipo y base del spike, NO como solución productiva final**
+(27/08/2026). Producción y datos reales siguen sin autorizar hasta superar el spike real.
+
+## Addendum vinculante de la aprobación
+
+1. `O_CREAT|O_EXCL` demuestra exclusión mutua **local**, pero no garantiza compare-and-swap
+   distribuido en SharePoint/Graph -- el spike debe reproducir la misma prueba de 20 escritores
+   concurrentes contra el backend real, no solo contra el sistema de archivos local.
+2. El `.claim` detecta el borrado de un solo artefacto; borrar evento **y** claim a la vez sigue
+   siendo invisible. Producción exige una cabeza/checkpoint **externo, inmutable y firmado**, con
+   copia bajo control de Claudia/LexGuardian -- confirma el límite que ya habíamos reconocido
+   como no resoluble solo por Maira.
+3. `paquete_accesible() == False` es un control de **aplicación**, no un ACL real. Durante el
+   sellado, ni Maira ni Claudia deberían tener acceso directo al almacén provisional -- la
+   restricción real debe imponerse en el almacenamiento mismo o mediante un escritor exclusivo.
+4. `confirmar_sellado_real()` solo puede activarse con evidencia verificable del proveedor
+   (etiqueta aplicada, bloqueo efectivo, auditoría correlacionada) -- **nunca** por temporizador
+   ni por el mero éxito de la petición a la API. *(Ya implementado: la función ahora exige los
+   tres campos de evidencia explícitamente, y los rechaza si faltan.)*
+5. Añadir al spike: recuperación tras una caída entre claim/evento/anclaje/sellado, confirmando
+   que nunca se publica un paquete ni se proyecta un estado dudoso. *(Ya probado en el
+   prototipo sintético: caída entre reclamar secuencia y escribir el evento, y caída a medio
+   sellar un paquete -- en ambos casos, nada se publica ni se proyecta.)*
+6. Si SharePoint no ofrece primitivas atómicas reales, aislamiento durante la ventana de latencia,
+   o confirmación fiable, la Opción A queda descartada y se adopta la Opción B sin más rediseño.
 
 ## 1. Los 4 cierres obligatorios -- ya implementados y probados (sintético, local)
 

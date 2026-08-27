@@ -112,20 +112,31 @@ def _escribir_paquete_atomico(operation_id: str, campos: dict, archivos: list) -
     return carpeta_paquete
 
 
-def confirmar_sellado_real(operation_id: str) -> None:
+CAMPOS_EVIDENCIA_SELLADO = ("etiqueta_aplicada", "bloqueo_efectivo", "referencia_auditoria")
+
+
+def confirmar_sellado_real(operation_id: str, evidencia: dict) -> None:
     """
-    READY (sellado local, contenido completo + hash) no es lo mismo que "protegido de verdad"
-    -- con la Opción A (etiquetas de retención), hay una ventana de latencia real entre marcar
-    READY y que Microsoft aplique el bloqueo efectivo. Durante esa ventana, el paquete debe
-    tratarse como inaccesible. En este prototipo, la confirmación es un marcador aparte que
-    debería activarse solo tras una señal real del mecanismo elegido (respuesta de la API de
-    etiquetado, webhook de Purview, etc.) -- aquí se deja como llamada explícita separada, nunca
-    automática al crear el paquete, precisamente para que nadie la dé por hecha sin esa señal.
+    READY (sellado local, contenido completo + hash) no es lo mismo que "protegido de verdad".
+    Esta función NUNCA debe activarse por un temporizador ni solo porque una petición a la API
+    del proveedor respondió con éxito -- exige evidencia verificable explícita: que la etiqueta
+    quedó realmente aplicada, que el bloqueo es efectivo (no solo solicitado), y una referencia
+    de auditoría correlacionada que lo confirme. Sin los tres campos, se rechaza la llamada.
     """
+    faltan = [c for c in CAMPOS_EVIDENCIA_SELLADO if not evidencia.get(c)]
+    if faltan:
+        raise ValueError(f"confirmar_sellado_real requiere evidencia verificable, faltan: {', '.join(faltan)}")
+
     carpeta_paquete = os.path.join(_carpeta_nuevas(), operation_id)
     ruta_confirmacion = os.path.join(carpeta_paquete, "sellado_confirmado.marker")
+    contenido = _serializar_manifiesto({
+        "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ETIQUETA_APLICADA": evidencia["etiqueta_aplicada"],
+        "BLOQUEO_EFECTIVO": evidencia["bloqueo_efectivo"],
+        "REFERENCIA_AUDITORIA": evidencia["referencia_auditoria"],
+    })
     with open(ruta_confirmacion, "w", encoding="utf-8") as f:
-        f.write(datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        f.write(contenido)
 
 
 def paquete_accesible(operation_id: str) -> bool:

@@ -70,9 +70,21 @@ def run_tests_sync():
     # -------------------------------------------------------------------------
     logger.info("\n--- TEST 1b: ventana de latencia entre READY y confirmación real ---")
     assert cmc.paquete_accesible(op_id) is False, "Sin confirmación del mecanismo real, el paquete no debe considerarse accesible"
-    cmc.confirmar_sellado_real(op_id)
+
+    try:
+        cmc.confirmar_sellado_real(op_id, {"etiqueta_aplicada": "si"})  # faltan bloqueo_efectivo y referencia_auditoria
+        assert False, "Sin evidencia completa, debe rechazarse -- nunca confirmar por fe"
+    except ValueError:
+        pass
+    assert cmc.paquete_accesible(op_id) is False, "Un intento de confirmación incompleto no debe dejar el paquete accesible"
+
+    cmc.confirmar_sellado_real(op_id, {
+        "etiqueta_aplicada": "record aplicado 2026-08-27T10:00:00Z",
+        "bloqueo_efectivo": "intento de edición rechazado por SharePoint (403)",
+        "referencia_auditoria": "purview-audit-id-12345",
+    })
     assert cmc.paquete_accesible(op_id) is True
-    logger.info("✅ TEST 1b superado: la confirmación real es un paso explícito y separado, nunca automático.")
+    logger.info("✅ TEST 1b superado: confirmar_sellado_real exige evidencia real de las tres cosas, nunca se acepta por fe ni por temporizador.")
 
     # -------------------------------------------------------------------------
     # 2. Entrada con cliente_id resuelto -> ESTADO_IDENTIDAD: RESUELTA
@@ -436,6 +448,42 @@ async def run_tests_async():
     except cmc.CadenaEventosInvalida:
         pass
     logger.info("✅ TEST 20 superado: borrar el último evento (sin borrar su reclamación de secuencia) se detecta y bloquea la proyección.")
+
+    # -------------------------------------------------------------------------
+    # 21. Recuperación tras caída ENTRE claim y evento: no publica ni proyecta un estado dudoso
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 21: caída simulada justo después de reclamar secuencia, antes de escribir el evento ---")
+    op_id_crash_evento = cmc.crear_operacion_entrada("34600001111", [("doc.pdf", b"f")])
+    cmc.registrar_evento_estado(op_id_crash_evento, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="ok-1")
+    # Simula el proceso muriendo justo tras reclamar la secuencia 1, antes de escribir el .json/.sha256
+    # (es exactamente lo que haría _reclamar_secuencia por sí sola, sin el resto de registrar_evento_estado).
+    cmc._reclamar_secuencia(op_id_crash_evento)
+
+    diagnostico_crash = cmc.diagnosticar_cadena_eventos(op_id_crash_evento)
+    assert diagnostico_crash["valida"] is False
+    assert diagnostico_crash["ultimo_evento_ausente"] is True
+    try:
+        cmc.obtener_estado_actual(op_id_crash_evento)
+        assert False, "Tras una caída a medias, nunca debe proyectarse un estado -- ni el viejo ni uno inventado"
+    except cmc.CadenaEventosInvalida:
+        pass
+    logger.info("✅ TEST 21 superado: una caída entre reclamar secuencia y escribir el evento se detecta, no se proyecta ningún estado.")
+
+    # -------------------------------------------------------------------------
+    # 22. Recuperación tras caída durante el SELLADO de un paquete (antes de escribir el hash)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 22: caída simulada a medio sellar un paquete (manifiesto sin hash) ---")
+    op_id_crash_paquete = cmc.crear_operacion_entrada("34600000000", [("doc.pdf", b"g")])
+    carpeta_paquete_crash = next(
+        p["_carpeta"] for p in cmc._listar_todos_los_paquetes() if p["OPERATION_ID"] == op_id_crash_paquete
+    )
+    # Simula una caída justo después de escribir manifiesto.md pero antes de manifiesto.sha256
+    os.remove(os.path.join(carpeta_paquete_crash, "manifiesto.sha256"))
+
+    paquetes_tras_crash = cmc._listar_todos_los_paquetes()
+    assert not any(p["OPERATION_ID"] == op_id_crash_paquete for p in paquetes_tras_crash), \
+        "Un paquete sin su hash (sellado incompleto) nunca debe aparecer como publicado/procesable"
+    logger.info("✅ TEST 22 superado: un sellado incompleto no publica el paquete, no queda a medias visible.")
 
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
