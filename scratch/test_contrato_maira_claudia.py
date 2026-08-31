@@ -522,7 +522,8 @@ async def run_tests_async():
     # 25. Con checkpoint que coincide con la cabeza, el estado pasa a firme (V2: vía ACK, no el
     # almacén completo -- y el ACK no debe filtrar detalles de firma)
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme, ACK sin detalles de firma ---")
+    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme, ACK verificable (V3: ya no despojado) ---")
+    cmc.registrar_clave_vigente("key-2026-01", identidad="claudia@berdejoasesores.com")
     checkpoint_id = cmc._simular_claudia_crear_checkpoint(op_id_anclaje, identidad_firmante="claudia@berdejoasesores.com", key_id="key-2026-01")
     confirmado_con_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje)
     assert confirmado_con_checkpoint["firme"] is True
@@ -530,9 +531,10 @@ async def run_tests_async():
 
     acks = cmc.leer_acks_checkpoint(op_id_anclaje)
     assert len(acks) == 1
-    for campo_sensible in ("FIRMA", "SIGNED_PAYLOAD_HASH", "ALGORITMO_FIRMA", "IDENTIDAD_FIRMANTE"):
-        assert campo_sensible not in acks[0], f"El ACK no debe filtrar {campo_sensible} -- eso queda en el almacén protegido"
-    logger.info("✅ TEST 25 superado: estado firme vía ACK mínimo, sin exponer detalles de firma a Maira.")
+    for campo_necesario in ("FIRMA", "SIGNED_PAYLOAD_HASH", "ALGORITMO_FIRMA", "IDENTIDAD_FIRMANTE"):
+        assert campo_necesario in acks[0], f"V3: el ACK SÍ debe traer {campo_necesario} -- si no, Maira no puede autenticarlo (corrección sobre la V2)"
+    assert cmc.verificar_checkpoint_estructural(acks[0]) is True
+    logger.info("✅ TEST 25 superado: estado firme vía ACK completo y verificable -- ya no un ACK sin poder de autenticarse.")
 
     # -------------------------------------------------------------------------
     # 26. Checkpoint DESACTUALIZADO (de una cabeza anterior) no confirma la cabeza nueva
@@ -574,10 +576,12 @@ async def run_tests_async():
     # -------------------------------------------------------------------------
     # 29. HASH_PAQUETE es obligatorio si hay paquete real; "NULL"+MOTIVO si no existe paquete
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 29: HASH_PAQUETE deriva del paquete real; NULL + MOTIVO_SIN_PAQUETE si no hay paquete ---")
+    logger.info("\n--- TEST 29: HASH_PAQUETE deriva del manifiesto sellado real; ausencia TIPADA + MOTIVO si no hay paquete ---")
     # op_id_anclaje SÍ tiene paquete real (se creó con crear_operacion_entrada)
-    assert checkpoint_completo["HASH_PAQUETE"] != "NULL"
-    assert "MOTIVO_SIN_PAQUETE" not in checkpoint_completo or not checkpoint_completo.get("MOTIVO_SIN_PAQUETE")
+    assert "HASH_PAQUETE" in checkpoint_completo and checkpoint_completo["HASH_PAQUETE"]
+    assert "MOTIVO_SIN_PAQUETE" not in checkpoint_completo, "Con paquete real, no debe aparecer MOTIVO_SIN_PAQUETE"
+    # Debe coincidir con el hash recalculado directamente sobre manifiesto.md, no uno derivado distinto
+    assert checkpoint_completo["HASH_PAQUETE"] == cmc._hash_manifiesto_sellado(op_id_anclaje)
 
     op_id_sin_paquete = "MAIRA-SINTETICA-SIN-PAQUETE-0001"
     cmc.registrar_evento_estado(op_id_sin_paquete, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="sp-1")
@@ -585,9 +589,10 @@ async def run_tests_async():
     checkpoint_sin_paquete = next(
         c for c in cmc._leer_anclaje_completo_para_pruebas(op_id_sin_paquete) if c["CHECKPOINT_ID"] == checkpoint_sin_paquete_id
     )
-    assert checkpoint_sin_paquete["HASH_PAQUETE"] == "NULL"
+    assert "HASH_PAQUETE" not in checkpoint_sin_paquete, "Sin paquete real, HASH_PAQUETE debe estar AUSENTE (ausencia tipada), no 'NULL' de texto"
     assert checkpoint_sin_paquete["MOTIVO_SIN_PAQUETE"] == "no_existe_paquete_para_esta_operacion"
-    logger.info("✅ TEST 29 superado: HASH_PAQUETE nunca es ambiguo -- real si hay paquete, NULL+motivo si no.")
+    assert cmc.verificar_checkpoint_estructural(checkpoint_sin_paquete) is True, "La ausencia tipada también debe entrar correctamente en el payload firmado"
+    logger.info("✅ TEST 29 superado: HASH_PAQUETE nunca es ambiguo -- recalculado del manifiesto real, o ausente+motivo si no hay paquete.")
 
     # -------------------------------------------------------------------------
     # 30. notificar_cabeza_nueva es idempotente: reintentar la misma cabeza no duplica
@@ -607,14 +612,19 @@ async def run_tests_async():
     logger.info("\n--- TEST 31: dos ACKs conflictivos para la misma secuencia -> CheckpointConflictivo ---")
     op_id_conflicto = cmc.crear_operacion_entrada("34600033333", [("doc.pdf", b"j")])
     cmc.registrar_evento_estado(op_id_conflicto, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cf-1")
-    cmc._crear_ack_checkpoint({
-        "CHECKPOINT_ID": "cp-fake-A", "OPERATION_ID": op_id_conflicto, "SECUENCIA": "0",
-        "HASH_CABEZA": "hash-A-fake", "HASH_PAQUETE": "NULL", "KEY_ID": "key-2026-01",
-    })
-    cmc._crear_ack_checkpoint({
-        "CHECKPOINT_ID": "cp-fake-B", "OPERATION_ID": op_id_conflicto, "SECUENCIA": "0",
-        "HASH_CABEZA": "hash-B-fake", "HASH_PAQUETE": "NULL", "KEY_ID": "key-2026-01",
-    })
+
+    def _ack_falso(checkpoint_id, hash_cabeza):
+        return {
+            "CHECKPOINT_ID": checkpoint_id, "OPERATION_ID": op_id_conflicto, "SECUENCIA": "0",
+            "HASH_CABEZA": hash_cabeza, "MOTIVO_SIN_PAQUETE": "no_existe_paquete_para_esta_operacion",
+            "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "KEY_ID": "key-2026-01",
+            "IDENTIDAD_FIRMANTE": "claudia@berdejoasesores.com", "ALGORITMO_FIRMA": "Ed25519",
+            "VERSION_ESQUEMA": cmc.VERSION_ESQUEMA_ANCLAJE, "SIGNED_PAYLOAD_HASH": "hash-firmado-fake",
+            "FIRMA": "firma-fake",
+        }
+
+    cmc._crear_ack_checkpoint(_ack_falso("cp-fake-A", "hash-A-fake"))
+    cmc._crear_ack_checkpoint(_ack_falso("cp-fake-B", "hash-B-fake"))
     try:
         cmc.obtener_estado_confirmado(op_id_conflicto)
         assert False, "Dos ACKs incompatibles para la misma secuencia deben bloquear la proyección"
@@ -623,16 +633,41 @@ async def run_tests_async():
     logger.info("✅ TEST 31 superado: checkpoints conflictivos bloquean la proyección, nunca se elige uno en silencio.")
 
     # -------------------------------------------------------------------------
-    # 32. Un checkpoint firmado con una clave ya revocada no cuenta como confirmación
+    # 32. Un checkpoint firmado con una clave ya revocada (tipo "cese") no cuenta como confirmación
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 32: clave revocada -> el checkpoint no confirma el estado ---")
+    logger.info("\n--- TEST 32: clave revocada (cese) -> el checkpoint no confirma el estado ---")
     op_id_revocada = cmc.crear_operacion_entrada("34600044444", [("doc.pdf", b"k")])
     cmc.registrar_evento_estado(op_id_revocada, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="rv-1")
-    cmc.revocar_clave("key-comprometida-001", motivo="rotación programada")
-    cmc._simular_claudia_crear_checkpoint(op_id_revocada, "claudia@berdejoasesores.com", "key-comprometida-001")
+    cmc.registrar_clave_vigente("key-a-revocar-001", identidad="claudia@berdejoasesores.com")
+    cmc.revocar_clave("key-a-revocar-001", tipo="cese", motivo="rotación programada")
+    cmc._simular_claudia_crear_checkpoint(op_id_revocada, "claudia@berdejoasesores.com", "key-a-revocar-001")
     confirmado_clave_revocada = cmc.obtener_estado_confirmado(op_id_revocada)
     assert confirmado_clave_revocada["firme"] is False, "Un checkpoint firmado con clave ya revocada no debe confirmar el estado"
-    logger.info("✅ TEST 32 superado: una clave revocada antes del checkpoint invalida esa confirmación.")
+    logger.info("✅ TEST 32 superado: una clave revocada (cese) antes del checkpoint invalida esa confirmación.")
+
+    # -------------------------------------------------------------------------
+    # 32b. Revocación por COMPROMISO invalida desde una fecha_efectiva anterior a la revocación misma
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 32b: revocación por compromiso invalida checkpoints anteriores a la fecha estimada del compromiso ---")
+    try:
+        cmc.revocar_clave("key-nunca-usada", tipo="compromiso", motivo="sin fecha")
+        assert False, "Una revocación por compromiso sin fecha_efectiva debe rechazarse"
+    except ValueError:
+        pass
+
+    op_id_compromiso = cmc.crear_operacion_entrada("34600066666", [("doc.pdf", b"m")])
+    cmc.registrar_evento_estado(op_id_compromiso, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cp-1")
+    cmc.registrar_clave_vigente("key-comprometida-002", identidad="claudia@berdejoasesores.com",
+                                 fecha_utc="2026-01-01T00:00:00Z")
+    checkpoint_antes_del_aviso = cmc._simular_claudia_crear_checkpoint(op_id_compromiso, "claudia@berdejoasesores.com", "key-comprometida-002")
+    # El compromiso se DETECTA hoy, pero se estima que la clave llevaba comprometida desde antes
+    # de que se firmara el checkpoint de arriba -- fecha_efectiva anterior a FECHA_UTC del checkpoint.
+    cmc.revocar_clave("key-comprometida-002", tipo="compromiso", motivo="clave filtrada, detectado tarde",
+                       fecha_efectiva="2026-01-15T00:00:00Z")
+    confirmado_compromiso = cmc.obtener_estado_confirmado(op_id_compromiso)
+    assert confirmado_compromiso["firme"] is False, \
+        "Una revocación por compromiso debe invalidar checkpoints firmados desde la fecha ESTIMADA, aunque sean anteriores al aviso de revocación"
+    logger.info("✅ TEST 32b superado: revocación por compromiso invalida retroactivamente desde la fecha estimada, no solo desde el aviso.")
 
     # -------------------------------------------------------------------------
     # 33. La cabeza cambia entre la primera y la segunda lectura -> se reintenta y firma la nueva

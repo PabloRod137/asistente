@@ -17,6 +17,7 @@ Este módulo:
 import os
 import time
 import uuid
+import json
 import hashlib
 import logging
 from datetime import datetime
@@ -599,54 +600,61 @@ def obtener_estado_actual(operation_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Anclaje externo (checkpoint firmado) -- V2, según el veredicto de Claudia del 31/08/2026 sobre
-# la V1 (aprobada como prototipo, pero exige V2 antes del spike real). Correcciones aplicadas:
+# Anclaje externo (checkpoint firmado) -- V3, según el veredicto de Claudia del 31/08/2026 sobre
+# la V2 ("mejora sustancialmente, pero requiere V3 antes del spike real"). Correcciones:
 #
-# 1. La firma cubre una serialización canónica completa y versionada (CAMPOS_FIRMADOS_ANCLAJE_V2),
-#    no solo IDENTIDAD_FIRMANTE -- se añade KEY_ID (identifica la clave/certificado real) y
-#    SIGNED_PAYLOAD_HASH (hash de la serialización canónica firmada). Verificación criptográfica
-#    real de FIRMA sigue pendiente del esquema de claves/PKI del spike -- ver
-#    verificar_checkpoint_estructural, que sí detecta manipulación estructural ya en el prototipo.
-# 2. Checkpoints incompatibles (misma OPERATION_ID+SECUENCIA, distinta HASH_CABEZA) bloquean la
-#    proyección con CheckpointConflictivo y quedan en el log de error -- nunca se elige uno en
-#    silencio. Rotación/revocación de clave: revocar_clave registra una revocación inmutable;
-#    un checkpoint firmado con una clave ya revocada en ese momento no cuenta como confirmación.
-# 3. HASH_PAQUETE ya no es ambiguo: se deriva SIEMPRE del hash real del paquete en disco (nunca
-#    del campo opcional del evento) -- "NULL" + MOTIVO_SIN_PAQUETE solo si de verdad no existe
-#    paquete para esa operación.
-# 4. Maira ya no lee el almacén protegido completo -- solo el ACK mínimo que Claudia le entrega
-#    (leer_acks_checkpoint), sin FIRMA, SIGNED_PAYLOAD_HASH ni ALGORITMO_FIRMA. La aplicación
-#    técnica real de "append-only" (permisos/retención/auditoría) es responsabilidad del spike,
-#    no de este módulo -- aquí solo se aplica O_CREAT|O_EXCL, que es la parte que sí depende del
-#    código.
-# 5. _simular_claudia_crear_checkpoint modela la instantánea estable: lee la cabeza, y la relee
-#    antes de firmar; si cambió, reintenta sobre la cabeza nueva. notificar_cabeza_nueva es
-#    idempotente por SECUENCIA (un reintento de la misma notificación no duplica nada).
-# 6. Ver docs/PROPUESTA_ANCLAJE_EXTERNO_V2.md para la lista de pruebas de spike ampliada (firma
-#    inválida, clave revocada, checkpoint conflictivo, cadena que cambia durante la firma, etc.).
+# 1. El ACK dejó de ser el eslabón débil: ahora es una copia COMPLETA y verificable del
+#    checkpoint persistido (incluye FIRMA y SIGNED_PAYLOAD_HASH) -- Maira puede verificarlo por
+#    sí misma con verificar_checkpoint_estructural, no solo confiar en de dónde vino el archivo.
+# 2. Serialización canónica: se sustituye el "campo=valor\n" (vulnerable a valores con '=', saltos
+#    de línea o unicode sin escapar) por un array JSON de valores en orden fijo, con
+#    ensure_ascii=True y separators sin espacios -- evita la ambigüedad de un objeto JSON (que
+#    exigiría ordenar claves al estilo RFC 8785) codificando el orden en la propia lista de
+#    campos, no en el documento. IDENTIDAD_FIRMANTE ahora forma parte de los campos firmados.
+# 3. La detección de conflicto compara una huella completa (HASH_CABEZA, HASH_PAQUETE,
+#    VERSION_ESQUEMA) por SECUENCIA, no solo HASH_CABEZA.
+# 4. HASH_PAQUETE usa ausencia TIPADA (la clave simplemente no existe, nunca "NULL" de texto) y
+#    se recalcula SIEMPRE directamente sobre manifiesto.md -- nunca leyendo manifiesto.sha256,
+#    que aunque hoy está protegido por la exclusividad del directorio del paquete, no tiene su
+#    propia protección O_CREAT|O_EXCL de archivo.
+# 5. _simular_claudia_crear_checkpoint relee el checkpoint YA ESCRITO en disco y lo verifica
+#    estructuralmente antes de publicar su ACK -- nunca publica un ACK solo porque la escritura
+#    "aparentemente" tuvo éxito. La exigencia de ETag/versionado real contra SharePoint queda
+#    en el spike (ver docs/PROPUESTA_ANCLAJE_EXTERNO_V3.md) -- un doble read local no puede
+#    simular la consistencia eventual de un backend remoto real.
+# 6. Confianza inicial explícita (registrar_clave_vigente -- default-DENY, una clave nunca se
+#    confía solo por aparecer en un checkpoint) y revocación tipada: "cese" es prospectiva
+#    (rotación normal), "compromiso" invalida desde una fecha_efectiva estimada que puede ser
+#    anterior a cuándo se detectó, obligando a reanclar con clave válida todo lo posterior.
+#    Fuente horaria: sigue siendo el reloj del proceso (datetime.utcnow()) -- no es una fuente de
+#    tiempo confiable frente a un adversario que controle el proceso; el spike debe evaluar usar
+#    el timestamp que el propio backend (SharePoint/Purview) asigna en servidor, no uno que
+#    cualquiera de las partes declare por su cuenta.
 # ---------------------------------------------------------------------------
 
 NOMBRE_CARPETA_NOTIFICACIONES = "NOTIFICACIONES_CABEZA"
 NOMBRE_CARPETA_ANCLAJE = "ANCLAJE_EXTERNO"      # almacén completo y protegido -- Maira no lo lee en producción
-NOMBRE_CARPETA_ACKS = "ACKS_ANCLAJE"            # lo único que Maira lee en producción: el ACK mínimo
+NOMBRE_CARPETA_ACKS = "ACKS_ANCLAJE"            # buzón de Maira: copia completa y verificable del checkpoint
 NOMBRE_CARPETA_CLAVES_REVOCADAS = "CLAVES_REVOCADAS"
+NOMBRE_CARPETA_CLAVES_VIGENTES = "CLAVES_VIGENTES"
 
-VERSION_ESQUEMA_ANCLAJE = "2"
+VERSION_ESQUEMA_ANCLAJE = "3"
+TIPOS_REVOCACION = ("cese", "compromiso")
+
 # Campos exactos, en este orden, que entran en el payload firmado -- cualquier cambio a esta
-# lista es un cambio de esquema y exige subir VERSION_ESQUEMA_ANCLAJE.
-CAMPOS_FIRMADOS_ANCLAJE_V2 = (
+# lista es un cambio de esquema y exige subir VERSION_ESQUEMA_ANCLAJE. Un campo ausente serializa
+# como null de verdad (json.dumps de una lista con None), no como cadena vacía ni "NULL" de texto.
+CAMPOS_FIRMADOS_ANCLAJE_V3 = (
     "CHECKPOINT_ID", "OPERATION_ID", "SECUENCIA", "HASH_CABEZA", "HASH_PAQUETE",
-    "MOTIVO_SIN_PAQUETE", "FECHA_UTC", "KEY_ID", "ALGORITMO_FIRMA", "VERSION_ESQUEMA",
+    "MOTIVO_SIN_PAQUETE", "FECHA_UTC", "KEY_ID", "IDENTIDAD_FIRMANTE",
+    "ALGORITMO_FIRMA", "VERSION_ESQUEMA",
 )
 CAMPOS_CHECKPOINT_OBLIGATORIOS = (
-    "CHECKPOINT_ID", "OPERATION_ID", "SECUENCIA", "HASH_CABEZA", "HASH_PAQUETE",
+    "CHECKPOINT_ID", "OPERATION_ID", "SECUENCIA", "HASH_CABEZA",
     "FECHA_UTC", "KEY_ID", "IDENTIDAD_FIRMANTE", "ALGORITMO_FIRMA", "VERSION_ESQUEMA",
     "SIGNED_PAYLOAD_HASH", "FIRMA",
-)
-CAMPOS_ACK_OBLIGATORIOS = (
-    "ACK_ID", "CHECKPOINT_ID", "OPERATION_ID", "SECUENCIA", "HASH_CABEZA",
-    "HASH_PAQUETE", "KEY_ID", "FECHA_UTC",
-)
+)  # HASH_PAQUETE queda fuera a propósito -- puede estar legítimamente ausente (ver _registro_bien_formado)
+CAMPOS_ACK_OBLIGATORIOS = CAMPOS_CHECKPOINT_OBLIGATORIOS + ("ACK_ID", "FECHA_ENTREGA_UTC")
 
 
 class CheckpointConflictivo(Exception):
@@ -673,6 +681,12 @@ def _carpeta_acks_operacion(operation_id: str) -> str:
 
 def _carpeta_claves_revocadas() -> str:
     ruta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_CLAVES_REVOCADAS)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _carpeta_claves_vigentes() -> str:
+    ruta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_CLAVES_VIGENTES)
     os.makedirs(ruta, exist_ok=True)
     return ruta
 
@@ -714,84 +728,125 @@ def notificar_cabeza_nueva(operation_id: str) -> str:
             return _parsear_manifiesto(f.read())["NOTIFICATION_ID"]
 
 
-def _hash_paquete_real(operation_id: str) -> str:
-    """Deriva HASH_PAQUETE del hash REAL del paquete en disco -- nunca del campo opcional del evento."""
+def _hash_manifiesto_sellado(operation_id: str) -> str | None:
+    """
+    Hash CANÓNICO del manifiesto ya sellado -- recomputado directamente sobre manifiesto.md,
+    nunca leído de manifiesto.sha256 (que, aunque hoy protegido por la exclusividad del
+    directorio del paquete, no tiene su propia protección de archivo O_CREAT|O_EXCL). Retorna
+    None (ausencia tipada, no "NULL" de texto) si no existe paquete para esa operación.
+    """
     paquete = next((p for p in _listar_todos_los_paquetes() if p["OPERATION_ID"] == operation_id), None)
     if paquete is None:
-        return "NULL"
-    with open(os.path.join(paquete["_carpeta"], "manifiesto.sha256"), "r", encoding="utf-8") as f:
-        return f.read().strip()
+        return None
+    return _sha256_archivo(os.path.join(paquete["_carpeta"], "manifiesto.md"))
 
 
 def _payload_canonico_checkpoint(campos: dict) -> bytes:
     """
-    Serialización canónica y determinista de los campos firmados: orden fijo (CAMPOS_FIRMADOS_
-    ANCLAJE_V2), un campo por línea, UTF-8 -- sin la ambigüedad de JSON (orden de claves,
-    espacios). Es la única superficie que la firma protege: cualquier cambio a estos valores, en
-    este orden, cambia SIGNED_PAYLOAD_HASH.
+    Serialización canónica y determinista de los campos firmados: un array JSON de valores en el
+    orden fijo de CAMPOS_FIRMADOS_ANCLAJE_V3 (el orden lo da la lista, no el documento -- evita
+    tener que canonicalizar un objeto al estilo RFC 8785), con ensure_ascii=True (sin ambigüedad
+    de normalización Unicode) y sin espacios. Un campo ausente serializa como null real, no como
+    cadena vacía. Es la única superficie que la firma protege.
     """
-    return "\n".join(f"{campo}={campos.get(campo, '')}" for campo in CAMPOS_FIRMADOS_ANCLAJE_V2).encode("utf-8")
+    valores = [campos.get(campo) for campo in CAMPOS_FIRMADOS_ANCLAJE_V3]
+    return json.dumps(valores, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
 def verificar_checkpoint_estructural(checkpoint: dict) -> bool:
     """
     Recalcula el hash canónico a partir de los propios campos del checkpoint y lo compara con
-    SIGNED_PAYLOAD_HASH -- detecta manipulación estructural incluso sin verificar FIRMA
-    criptográficamente todavía (eso depende del esquema de claves/PKI real, pendiente del spike).
+    SIGNED_PAYLOAD_HASH -- detecta manipulación estructural (incluida una falsificación del ACK
+    por otro escritor con acceso al buzón) sin verificar FIRMA criptográficamente todavía, lo que
+    depende del esquema de claves/PKI real pendiente del spike.
     """
     return hashlib.sha256(_payload_canonico_checkpoint(checkpoint)).hexdigest() == checkpoint.get("SIGNED_PAYLOAD_HASH")
 
 
-def revocar_clave(key_id: str, motivo: str, fecha_utc: str = None) -> None:
+def _registro_bien_formado(campos: dict, campos_obligatorios: tuple) -> bool:
+    """HASH_PAQUETE y MOTIVO_SIN_PAQUETE son mutuamente excluyentes: exactamente uno debe estar presente."""
+    tiene_obligatorios = all(campos.get(c) for c in campos_obligatorios)
+    paquete_xor_motivo = ("HASH_PAQUETE" in campos) != ("MOTIVO_SIN_PAQUETE" in campos)
+    return tiene_obligatorios and paquete_xor_motivo
+
+
+def registrar_clave_vigente(key_id: str, identidad: str, fecha_utc: str = None) -> None:
     """
-    SOLO PARA PRUEBAS SINTÉTICAS: simula el registro de revocación de una clave/certificado del
-    lado de LexGuardian. Una revocación es inmutable -- nunca se deshace escribiendo encima.
+    SOLO PARA PRUEBAS SINTÉTICAS: confianza inicial EXPLÍCITA -- una clave nunca se considera
+    vigente solo por aparecer en un checkpoint (default-deny, no default-allow). Rotación de
+    claves = registrar la nueva + revocar la vieja con tipo="cese" desde la fecha de corte.
     """
-    ruta = os.path.join(_carpeta_claves_revocadas(), f"{key_id}.json")
+    ruta = os.path.join(_carpeta_claves_vigentes(), f"{key_id}.json")
     campos = {
         "KEY_ID": key_id,
-        "MOTIVO": motivo,
-        "FECHA_UTC": fecha_utc or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "IDENTIDAD": identidad,
+        "FECHA_ALTA_UTC": fecha_utc or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(_serializar_manifiesto(campos))
 
 
-def _clave_revocada_antes_de(key_id: str, fecha_utc_checkpoint: str) -> bool:
+def revocar_clave(key_id: str, tipo: str, motivo: str, fecha_utc: str = None, fecha_efectiva: str = None) -> None:
     """
-    Regla implementada (la más simple, hacia adelante): si la clave fue revocada en o antes de la
-    fecha del checkpoint, el checkpoint no cuenta como confirmación. Si la revocación es
-    posterior, el checkpoint sigue siendo válido -- salvo que la revocación sea por compromiso de
-    la clave, en cuyo caso podría hacer falta invalidar checkpoints anteriores también. Esa
-    política queda pendiente de decidir en el spike; aquí solo se implementa la regla simple.
+    SOLO PARA PRUEBAS SINTÉTICAS. tipo="cese": revocación PROSPECTIVA (rotación normal, fin de
+    vida útil) -- invalida checkpoints firmados en o después de esta revocación, nunca los
+    anteriores. tipo="compromiso": invalida checkpoints firmados en o después de fecha_efectiva
+    -- la fecha ESTIMADA del compromiso, que puede ser anterior a cuándo se detectó -- y obliga a
+    reanclar con una clave válida todo lo posterior a esa fecha.
     """
+    if tipo not in TIPOS_REVOCACION:
+        raise ValueError(f"tipo de revocación inválido: {tipo}")
+    fecha_utc = fecha_utc or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if tipo == "compromiso":
+        if not fecha_efectiva:
+            raise ValueError("Una revocación por compromiso exige fecha_efectiva (fecha estimada del compromiso)")
+        fecha_corte = fecha_efectiva
+    else:
+        fecha_corte = fecha_utc
+
     ruta = os.path.join(_carpeta_claves_revocadas(), f"{key_id}.json")
-    if not os.path.exists(ruta):
+    campos = {
+        "KEY_ID": key_id,
+        "TIPO": tipo,
+        "MOTIVO": motivo,
+        "FECHA_UTC": fecha_utc,
+        "FECHA_CORTE": fecha_corte,
+    }
+    fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # una revocación es inmutable, nunca se deshace
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(_serializar_manifiesto(campos))
+
+
+def _clave_vigente_en(key_id: str, fecha_utc_checkpoint: str) -> bool:
+    """Vigente = dada de alta antes (o en) esa fecha, y sin corte de revocación anterior (o igual) a esa fecha."""
+    ruta_alta = os.path.join(_carpeta_claves_vigentes(), f"{key_id}.json")
+    if not os.path.exists(ruta_alta):
         return False
-    with open(ruta, "r", encoding="utf-8") as f:
+    with open(ruta_alta, "r", encoding="utf-8") as f:
+        alta = _parsear_manifiesto(f.read())
+    if alta["FECHA_ALTA_UTC"] > fecha_utc_checkpoint:
+        return False
+
+    ruta_revocacion = os.path.join(_carpeta_claves_revocadas(), f"{key_id}.json")
+    if not os.path.exists(ruta_revocacion):
+        return True
+    with open(ruta_revocacion, "r", encoding="utf-8") as f:
         revocacion = _parsear_manifiesto(f.read())
-    return revocacion["FECHA_UTC"] <= fecha_utc_checkpoint
+    return revocacion["FECHA_CORTE"] > fecha_utc_checkpoint
 
 
 def _crear_ack_checkpoint(checkpoint: dict) -> str:
     """
-    SOLO PARA PRUEBAS SINTÉTICAS: simula a Claudia entregando el ACK mínimo a Maira tras crear el
-    checkpoint. Deliberadamente NO incluye IDENTIDAD_FIRMANTE, ALGORITMO_FIRMA,
-    SIGNED_PAYLOAD_HASH ni FIRMA -- esos detalles quedan en el almacén protegido; Maira solo
-    recibe lo necesario para decidir si su cabeza local está confirmada.
+    SOLO PARA PRUEBAS SINTÉTICAS: simula a Claudia entregando el ACK a Maira. El ACK es una copia
+    COMPLETA y verificable del checkpoint persistido (incluye FIRMA y SIGNED_PAYLOAD_HASH) -- un
+    ACK despojado de esos campos no se puede autenticar, y el acceso de solo lectura al buzón no
+    evita que otro escritor falsifique uno; Maira tiene que poder verificarlo por sí misma.
     """
     ack_id = uuid.uuid4().hex[:12]
-    campos = {
-        "ACK_ID": ack_id,
-        "CHECKPOINT_ID": checkpoint["CHECKPOINT_ID"],
-        "OPERATION_ID": checkpoint["OPERATION_ID"],
-        "SECUENCIA": checkpoint["SECUENCIA"],
-        "HASH_CABEZA": checkpoint["HASH_CABEZA"],
-        "HASH_PAQUETE": checkpoint["HASH_PAQUETE"],
-        "KEY_ID": checkpoint["KEY_ID"],
-        "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
+    campos = dict(checkpoint)
+    campos["ACK_ID"] = ack_id
+    campos["FECHA_ENTREGA_UTC"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     carpeta = _carpeta_acks_operacion(checkpoint["OPERATION_ID"])
     ruta = os.path.join(carpeta, f"{ack_id}.json")
     fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -800,13 +855,24 @@ def _crear_ack_checkpoint(checkpoint: dict) -> str:
     return ack_id
 
 
+def _leer_checkpoint_individual(carpeta_anclaje: str, checkpoint_id: str) -> dict | None:
+    ruta = os.path.join(carpeta_anclaje, f"{checkpoint_id}.json")
+    if not os.path.exists(ruta):
+        return None
+    with open(ruta, "r", encoding="utf-8") as f:
+        campos = _parsear_manifiesto(f.read())
+    return campos if _registro_bien_formado(campos, CAMPOS_CHECKPOINT_OBLIGATORIOS) else None
+
+
 def _simular_claudia_crear_checkpoint(operation_id: str, identidad_firmante: str, key_id: str,
                                        algoritmo_firma: str = "Ed25519", max_reintentos: int = 3) -> str:
     """
     SOLO PARA PRUEBAS SINTÉTICAS: simula el lado de Claudia. Modela la instantánea estable exigida
     -- lee la cabeza, y la relee antes de firmar; si cambió entre medias, reintenta sobre la
-    cabeza nueva en vez de firmar una vista obsoleta. En el sistema real, quien ejecuta esto es
-    Claudia -- Maira nunca escribe en el almacén de anclaje protegido ni en los ACKs.
+    cabeza nueva en vez de firmar una vista obsoleta -- y confirma que el checkpoint quedó
+    persistido (releído desde disco y verificado estructuralmente) antes de publicar su ACK. En
+    el sistema real, quien ejecuta esto es Claudia -- Maira nunca escribe en el almacén de
+    anclaje protegido ni en los ACKs.
     """
     for _ in range(max_reintentos):
         d1 = diagnosticar_cadena_eventos(operation_id)
@@ -832,16 +898,17 @@ def _simular_claudia_crear_checkpoint(operation_id: str, identidad_firmante: str
         "HASH_CABEZA": cabeza["_hash_evento"],
         "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "KEY_ID": key_id,
+        "IDENTIDAD_FIRMANTE": identidad_firmante,
         "ALGORITMO_FIRMA": algoritmo_firma,
         "VERSION_ESQUEMA": VERSION_ESQUEMA_ANCLAJE,
     }
-    hash_paquete = _hash_paquete_real(operation_id)
-    campos["HASH_PAQUETE"] = hash_paquete
-    if hash_paquete == "NULL":
+    hash_paquete = _hash_manifiesto_sellado(operation_id)
+    if hash_paquete is not None:
+        campos["HASH_PAQUETE"] = hash_paquete
+    else:
         campos["MOTIVO_SIN_PAQUETE"] = "no_existe_paquete_para_esta_operacion"
 
     campos["SIGNED_PAYLOAD_HASH"] = hashlib.sha256(_payload_canonico_checkpoint(campos)).hexdigest()
-    campos["IDENTIDAD_FIRMANTE"] = identidad_firmante
     # Marcador de firma para el prototipo -- verificación criptográfica real pendiente del
     # esquema de claves/PKI que se decida en el spike, no se valida matemáticamente aquí.
     campos["FIRMA"] = _sha256_bytes(f"{campos['SIGNED_PAYLOAD_HASH']}{key_id}".encode())
@@ -852,7 +919,11 @@ def _simular_claudia_crear_checkpoint(operation_id: str, identidad_firmante: str
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(_serializar_manifiesto(campos))
 
-    _crear_ack_checkpoint(campos)
+    checkpoint_persistido = _leer_checkpoint_individual(carpeta, campos["CHECKPOINT_ID"])
+    if checkpoint_persistido is None or not verificar_checkpoint_estructural(checkpoint_persistido):
+        raise RuntimeError(f"El checkpoint {campos['CHECKPOINT_ID']} no se pudo confirmar persistido -- no se publica ACK")
+
+    _crear_ack_checkpoint(checkpoint_persistido)
     return campos["CHECKPOINT_ID"]
 
 
@@ -867,16 +938,16 @@ def _leer_anclaje_completo_para_pruebas(operation_id: str) -> list:
             continue
         with open(os.path.join(carpeta, nombre), "r", encoding="utf-8") as f:
             campos = _parsear_manifiesto(f.read())
-        if all(campos.get(c) for c in CAMPOS_CHECKPOINT_OBLIGATORIOS):
+        if _registro_bien_formado(campos, CAMPOS_CHECKPOINT_OBLIGATORIOS):
             checkpoints.append(campos)
     return checkpoints
 
 
 def leer_acks_checkpoint(operation_id: str) -> list:
     """
-    Única lectura que Maira necesita en producción: el ACK mínimo, nunca el almacén protegido
-    completo -- Maira no necesita ver FIRMA, SIGNED_PAYLOAD_HASH ni ALGORITMO_FIRMA para saber si
-    su cabeza está confirmada.
+    Única lectura que Maira necesita en producción: el ACK, entregado uno a uno en su propio
+    buzón por operación -- nunca un listado abierto de todo el almacén protegido. A diferencia de
+    la V2, el ACK SÍ trae lo necesario para autenticarse (ver verificar_checkpoint_estructural).
     """
     carpeta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_ACKS, operation_id)
     if not os.path.isdir(carpeta):
@@ -887,7 +958,7 @@ def leer_acks_checkpoint(operation_id: str) -> list:
             continue
         with open(os.path.join(carpeta, nombre), "r", encoding="utf-8") as f:
             campos = _parsear_manifiesto(f.read())
-        if all(campos.get(c) for c in CAMPOS_ACK_OBLIGATORIOS):
+        if _registro_bien_formado(campos, CAMPOS_ACK_OBLIGATORIOS):
             acks.append(campos)
     return acks
 
@@ -895,10 +966,12 @@ def leer_acks_checkpoint(operation_id: str) -> list:
 def obtener_estado_confirmado(operation_id: str) -> dict:
     """
     A diferencia de obtener_estado_actual (proyección local, PROVISIONAL), esto solo marca un
-    estado como firme si existe un ACK cuyo SECUENCIA, HASH_CABEZA y HASH_PAQUETE coinciden
-    exactamente con la cabeza local, y cuya clave no estuviera ya revocada en ese momento. Dos
-    ACKs para la misma SECUENCIA con distinta HASH_CABEZA bloquean la proyección entera --
-    CheckpointConflictivo, nunca se elige uno en silencio.
+    estado como firme si existe un ACK que (a) verifica estructuralmente
+    (verificar_checkpoint_estructural), (b) coincide en SECUENCIA, HASH_CABEZA y HASH_PAQUETE con
+    la cabeza local, y (c) fue firmado con una clave vigente en esa fecha (alta registrada, sin
+    revocación de corte anterior). Dos ACKs para la misma SECUENCIA cuya huella (HASH_CABEZA,
+    HASH_PAQUETE, VERSION_ESQUEMA) difiere bloquean la proyección entera -- CheckpointConflictivo,
+    nunca se elige uno en silencio.
     """
     diagnostico = diagnosticar_cadena_eventos(operation_id)
     if not diagnostico["eventos"]:
@@ -915,21 +988,25 @@ def obtener_estado_confirmado(operation_id: str) -> dict:
 
     por_secuencia = {}
     for ack in acks:
-        por_secuencia.setdefault(ack["SECUENCIA"], set()).add(ack["HASH_CABEZA"])
-    conflictos = {seq: hashes for seq, hashes in por_secuencia.items() if len(hashes) > 1}
+        huella = (ack.get("HASH_CABEZA"), ack.get("HASH_PAQUETE"), ack.get("VERSION_ESQUEMA"))
+        por_secuencia.setdefault(ack["SECUENCIA"], set()).add(huella)
+    conflictos = {seq: huellas for seq, huellas in por_secuencia.items() if len(huellas) > 1}
     if conflictos:
         logger.error(f"Checkpoints CONFLICTIVOS para {operation_id}: {conflictos} -- posible bifurcación en el anclaje externo")
         raise CheckpointConflictivo(f"Checkpoints incompatibles para {operation_id} en secuencia(s) {list(conflictos.keys())}")
 
-    hash_paquete_real = _hash_paquete_real(operation_id)
+    hash_paquete_real = _hash_manifiesto_sellado(operation_id)
     for ack in acks:
         if not (ack["SECUENCIA"] == cabeza["SECUENCIA"]
                 and ack["HASH_CABEZA"] == cabeza["_hash_evento"]
-                and ack["HASH_PAQUETE"] == hash_paquete_real):
+                and ack.get("HASH_PAQUETE") == hash_paquete_real):
             continue
-        if _clave_revocada_antes_de(ack["KEY_ID"], ack["FECHA_UTC"]):
-            logger.error(f"ACK {ack['ACK_ID']} de {operation_id} firmado con clave ya revocada ({ack['KEY_ID']}) -- no cuenta como confirmación")
+        if not verificar_checkpoint_estructural(ack):
+            logger.error(f"ACK {ack['ACK_ID']} de {operation_id} no verifica estructuralmente -- descartado, posible falsificación")
+            continue
+        if not _clave_vigente_en(ack["KEY_ID"], ack["FECHA_UTC"]):
+            logger.error(f"ACK {ack['ACK_ID']} de {operation_id} firmado con clave no vigente ({ack['KEY_ID']}) en esa fecha -- no cuenta")
             continue
         return {"estado": estado_provisional, "firme": True, "checkpoint_id": ack["CHECKPOINT_ID"]}
 
-    return {"estado": estado_provisional, "firme": False, "motivo": "sin ACK que coincida con la cabeza actual y una clave vigente"}
+    return {"estado": estado_provisional, "firme": False, "motivo": "sin ACK verificable que coincida con la cabeza actual y una clave vigente"}
