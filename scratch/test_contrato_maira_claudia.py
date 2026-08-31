@@ -519,14 +519,20 @@ async def run_tests_async():
     logger.info("✅ TEST 24 superado: sin anclaje externo, el estado nunca se reporta como firme.")
 
     # -------------------------------------------------------------------------
-    # 25. Con checkpoint que coincide con la cabeza, el estado pasa a firme
+    # 25. Con checkpoint que coincide con la cabeza, el estado pasa a firme (V2: vía ACK, no el
+    # almacén completo -- y el ACK no debe filtrar detalles de firma)
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme ---")
-    checkpoint_id = cmc._simular_claudia_crear_checkpoint(op_id_anclaje, identidad_firmante="claudia@berdejoasesores.com")
+    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme, ACK sin detalles de firma ---")
+    checkpoint_id = cmc._simular_claudia_crear_checkpoint(op_id_anclaje, identidad_firmante="claudia@berdejoasesores.com", key_id="key-2026-01")
     confirmado_con_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje)
     assert confirmado_con_checkpoint["firme"] is True
     assert confirmado_con_checkpoint["checkpoint_id"] == checkpoint_id
-    logger.info("✅ TEST 25 superado: con un checkpoint que coincide en secuencia y hashes, el estado se marca firme.")
+
+    acks = cmc.leer_acks_checkpoint(op_id_anclaje)
+    assert len(acks) == 1
+    for campo_sensible in ("FIRMA", "SIGNED_PAYLOAD_HASH", "ALGORITMO_FIRMA", "IDENTIDAD_FIRMANTE"):
+        assert campo_sensible not in acks[0], f"El ACK no debe filtrar {campo_sensible} -- eso queda en el almacén protegido"
+    logger.info("✅ TEST 25 superado: estado firme vía ACK mínimo, sin exponer detalles de firma a Maira.")
 
     # -------------------------------------------------------------------------
     # 26. Checkpoint DESACTUALIZADO (de una cabeza anterior) no confirma la cabeza nueva
@@ -539,7 +545,7 @@ async def run_tests_async():
     logger.info("✅ TEST 26 superado: un checkpoint desactualizado no confirma silenciosamente un estado posterior.")
 
     # -------------------------------------------------------------------------
-    # 27. Maira nunca escribe en el almacén de anclaje externo (fuera de la simulación de pruebas)
+    # 27. El anclaje protegido es append-only, sin doble escritura del mismo checkpoint
     # -------------------------------------------------------------------------
     logger.info("\n--- TEST 27: el anclaje externo es append-only, sin doble escritura del mismo checkpoint ---")
     ruta_checkpoint = os.path.join(cmc._carpeta_anclaje_operacion(op_id_anclaje), f"{checkpoint_id}.json")
@@ -550,6 +556,117 @@ async def run_tests_async():
     except FileExistsError:
         pass
     logger.info("✅ TEST 27 superado: un checkpoint ya escrito nunca admite una segunda escritura.")
+
+    # -------------------------------------------------------------------------
+    # 28. Verificación estructural: recalcular SIGNED_PAYLOAD_HASH detecta manipulación
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 28: verificar_checkpoint_estructural detecta manipulación de campos firmados ---")
+    checkpoint_completo = next(
+        c for c in cmc._leer_anclaje_completo_para_pruebas(op_id_anclaje) if c["CHECKPOINT_ID"] == checkpoint_id
+    )
+    assert cmc.verificar_checkpoint_estructural(checkpoint_completo) is True
+
+    checkpoint_manipulado = dict(checkpoint_completo)
+    checkpoint_manipulado["HASH_CABEZA"] = "hash-falso-inyectado"
+    assert cmc.verificar_checkpoint_estructural(checkpoint_manipulado) is False
+    logger.info("✅ TEST 28 superado: cambiar un campo firmado invalida el hash canónico recalculado.")
+
+    # -------------------------------------------------------------------------
+    # 29. HASH_PAQUETE es obligatorio si hay paquete real; "NULL"+MOTIVO si no existe paquete
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 29: HASH_PAQUETE deriva del paquete real; NULL + MOTIVO_SIN_PAQUETE si no hay paquete ---")
+    # op_id_anclaje SÍ tiene paquete real (se creó con crear_operacion_entrada)
+    assert checkpoint_completo["HASH_PAQUETE"] != "NULL"
+    assert "MOTIVO_SIN_PAQUETE" not in checkpoint_completo or not checkpoint_completo.get("MOTIVO_SIN_PAQUETE")
+
+    op_id_sin_paquete = "MAIRA-SINTETICA-SIN-PAQUETE-0001"
+    cmc.registrar_evento_estado(op_id_sin_paquete, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="sp-1")
+    checkpoint_sin_paquete_id = cmc._simular_claudia_crear_checkpoint(op_id_sin_paquete, "claudia@berdejoasesores.com", "key-2026-01")
+    checkpoint_sin_paquete = next(
+        c for c in cmc._leer_anclaje_completo_para_pruebas(op_id_sin_paquete) if c["CHECKPOINT_ID"] == checkpoint_sin_paquete_id
+    )
+    assert checkpoint_sin_paquete["HASH_PAQUETE"] == "NULL"
+    assert checkpoint_sin_paquete["MOTIVO_SIN_PAQUETE"] == "no_existe_paquete_para_esta_operacion"
+    logger.info("✅ TEST 29 superado: HASH_PAQUETE nunca es ambiguo -- real si hay paquete, NULL+motivo si no.")
+
+    # -------------------------------------------------------------------------
+    # 30. notificar_cabeza_nueva es idempotente: reintentar la misma cabeza no duplica
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 30: notificar_cabeza_nueva es idempotente por SECUENCIA ---")
+    op_id_notif_idem = cmc.crear_operacion_entrada("34600022222", [("doc.pdf", b"i")])
+    cmc.registrar_evento_estado(op_id_notif_idem, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="ni-1")
+    id_1 = cmc.notificar_cabeza_nueva(op_id_notif_idem)
+    id_2 = cmc.notificar_cabeza_nueva(op_id_notif_idem)
+    assert id_1 == id_2, "Reintentar la notificación de la misma cabeza debe devolver la misma NOTIFICATION_ID"
+    assert len(os.listdir(cmc._carpeta_notificaciones_operacion(op_id_notif_idem))) == 1, "No debe crear un segundo archivo"
+    logger.info("✅ TEST 30 superado: notificar la misma cabeza dos veces no duplica nada.")
+
+    # -------------------------------------------------------------------------
+    # 31. Checkpoints CONFLICTIVOS (misma SECUENCIA, distinta HASH_CABEZA) bloquean la proyección
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 31: dos ACKs conflictivos para la misma secuencia -> CheckpointConflictivo ---")
+    op_id_conflicto = cmc.crear_operacion_entrada("34600033333", [("doc.pdf", b"j")])
+    cmc.registrar_evento_estado(op_id_conflicto, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cf-1")
+    cmc._crear_ack_checkpoint({
+        "CHECKPOINT_ID": "cp-fake-A", "OPERATION_ID": op_id_conflicto, "SECUENCIA": "0",
+        "HASH_CABEZA": "hash-A-fake", "HASH_PAQUETE": "NULL", "KEY_ID": "key-2026-01",
+    })
+    cmc._crear_ack_checkpoint({
+        "CHECKPOINT_ID": "cp-fake-B", "OPERATION_ID": op_id_conflicto, "SECUENCIA": "0",
+        "HASH_CABEZA": "hash-B-fake", "HASH_PAQUETE": "NULL", "KEY_ID": "key-2026-01",
+    })
+    try:
+        cmc.obtener_estado_confirmado(op_id_conflicto)
+        assert False, "Dos ACKs incompatibles para la misma secuencia deben bloquear la proyección"
+    except cmc.CheckpointConflictivo:
+        pass
+    logger.info("✅ TEST 31 superado: checkpoints conflictivos bloquean la proyección, nunca se elige uno en silencio.")
+
+    # -------------------------------------------------------------------------
+    # 32. Un checkpoint firmado con una clave ya revocada no cuenta como confirmación
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 32: clave revocada -> el checkpoint no confirma el estado ---")
+    op_id_revocada = cmc.crear_operacion_entrada("34600044444", [("doc.pdf", b"k")])
+    cmc.registrar_evento_estado(op_id_revocada, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="rv-1")
+    cmc.revocar_clave("key-comprometida-001", motivo="rotación programada")
+    cmc._simular_claudia_crear_checkpoint(op_id_revocada, "claudia@berdejoasesores.com", "key-comprometida-001")
+    confirmado_clave_revocada = cmc.obtener_estado_confirmado(op_id_revocada)
+    assert confirmado_clave_revocada["firme"] is False, "Un checkpoint firmado con clave ya revocada no debe confirmar el estado"
+    logger.info("✅ TEST 32 superado: una clave revocada antes del checkpoint invalida esa confirmación.")
+
+    # -------------------------------------------------------------------------
+    # 33. La cabeza cambia entre la primera y la segunda lectura -> se reintenta y firma la nueva
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 33: la cabeza cambia a mitad de la verificación -> se firma la cabeza actualizada, no la obsoleta ---")
+    op_id_carrera = cmc.crear_operacion_entrada("34600055555", [("doc.pdf", b"l")])
+    cmc.registrar_evento_estado(op_id_carrera, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="race-1")
+
+    _original_diagnosticar = cmc.diagnosticar_cadena_eventos
+    _contador = {"n": 0}
+
+    def _diagnosticar_con_carrera(operation_id):
+        _contador["n"] += 1
+        resultado = _original_diagnosticar(operation_id)
+        if _contador["n"] == 1 and operation_id == op_id_carrera:
+            # Simula que, justo tras la primera lectura de Claudia, llega un evento nuevo antes
+            # de que ella vuelva a leer para firmar.
+            cmc.registrar_evento_estado(operation_id, "04_ENTREGADAS", actor="Claudia", comando_id="race-2")
+        return resultado
+
+    cmc.diagnosticar_cadena_eventos = _diagnosticar_con_carrera
+    try:
+        checkpoint_id_carrera = cmc._simular_claudia_crear_checkpoint(op_id_carrera, "claudia@berdejoasesores.com", "key-2026-01")
+    finally:
+        cmc.diagnosticar_cadena_eventos = _original_diagnosticar
+
+    checkpoint_carrera = next(
+        c for c in cmc._leer_anclaje_completo_para_pruebas(op_id_carrera) if c["CHECKPOINT_ID"] == checkpoint_id_carrera
+    )
+    cabeza_real_final = cmc._leer_todos_los_eventos(op_id_carrera)[-1]
+    assert checkpoint_carrera["HASH_CABEZA"] == cabeza_real_final["_hash_evento"], \
+        "Debe haber firmado la cabeza ACTUALIZADA (04_ENTREGADAS), no la obsoleta (01_ORDENES_ACEPTADAS)"
+    assert checkpoint_carrera["SECUENCIA"] == "1"
+    logger.info("✅ TEST 33 superado: un cambio de cabeza a mitad de la verificación provoca un reintento sobre la cabeza real.")
 
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
