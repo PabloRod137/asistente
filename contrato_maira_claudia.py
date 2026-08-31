@@ -582,6 +582,10 @@ def obtener_estado_actual(operation_id: str) -> str | None:
     cadena de eventos. Si no hay eventos, retorna None. Si la cadena no es fiable (hueco,
     bifurcación, o el último evento ha desaparecido), se BLOQUEA la proyección lanzando
     CadenaEventosInvalida en vez de arriesgarse a devolver un estado desactualizado o manipulado.
+
+    IMPORTANTE: esto es una proyección LOCAL, PROVISIONAL -- verificar la cadena localmente no la
+    hace firme. Para saber si un estado ya tiene el anclaje externo que lo confirma, usar
+    obtener_estado_confirmado().
     """
     diagnostico = diagnosticar_cadena_eventos(operation_id)
     if not diagnostico["eventos"]:
@@ -592,3 +596,158 @@ def obtener_estado_actual(operation_id: str) -> str | None:
             f"cadena_rota={diagnostico['cadena_rota']}, ultimo_evento_ausente={diagnostico['ultimo_evento_ausente']}"
         )
     return diagnostico["eventos"][-1]["ESTADO_NUEVO"]
+
+
+# ---------------------------------------------------------------------------
+# Anclaje externo (checkpoint firmado) -- modelo acordado con Claudia el 31/08/2026 en respuesta
+# al addendum del Broker/ACL V4 (punto 2): un evento NO se considera firme solo porque la cadena
+# local verifique. Hace falta un checkpoint externo, firmado, inmutable y correlacionado por
+# operación, que Claudia genera leyendo la cadena por su cuenta desde la fuente -- nunca
+# confiando en el contenido de la notificación de Maira, que es solo un disparador.
+#
+# Modelo:
+# 1. Maira notifica una cabeza nueva (notificar_cabeza_nueva) -- deliberadamente mínima, sin
+#    HASH_CABEZA ni ningún dato que pudiera tratarse como fuente de verdad. Solo dispara el
+#    proceso; Claudia relee la cadena real desde el origen y calcula esos valores por su cuenta.
+# 2. Claudia verifica secuencia, hashes, ausencia de huecos/bifurcaciones, y firma una copia
+#    independiente: el checkpoint (CHECKPOINT_ID, OPERATION_ID, SECUENCIA, HASH_CABEZA,
+#    HASH_PAQUETE, FECHA_UTC, IDENTIDAD_FIRMANTE, ALGORITMO_FIRMA, VERSION_ESQUEMA, FIRMA).
+# 3. El checkpoint vive en un almacén append-only FUERA del control de Maira -- este módulo nunca
+#    escribe ahí salvo en el helper de simulación explícitamente marcado como tal para pruebas
+#    (mismo patrón ya usado en crear_resolucion_identidad, que simula el lado de Claudia).
+# 4. Un evento no se considera firme hasta que su checkpoint coincide en SECUENCIA, HASH_CABEZA
+#    y HASH_PAQUETE con la cabeza local -- ver obtener_estado_confirmado.
+#
+# Pendiente, no resuelto aquí: la verificación criptográfica real de FIRMA depende de qué
+# esquema de claves/PKI se decida en el spike -- el prototipo exige que el campo exista, no lo
+# verifica matemáticamente.
+# ---------------------------------------------------------------------------
+
+NOMBRE_CARPETA_NOTIFICACIONES = "NOTIFICACIONES_CABEZA"
+NOMBRE_CARPETA_ANCLAJE = "ANCLAJE_EXTERNO"
+CAMPOS_CHECKPOINT_OBLIGATORIOS = (
+    "CHECKPOINT_ID", "OPERATION_ID", "SECUENCIA", "HASH_CABEZA",
+    "FECHA_UTC", "IDENTIDAD_FIRMANTE", "ALGORITMO_FIRMA", "VERSION_ESQUEMA", "FIRMA",
+)  # HASH_PAQUETE queda fuera a propósito: puede ser legítimamente "" si la cabeza no referencia paquete
+
+
+def _carpeta_notificaciones_operacion(operation_id: str) -> str:
+    ruta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_NOTIFICACIONES, operation_id)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _carpeta_anclaje_operacion(operation_id: str) -> str:
+    ruta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_ANCLAJE, operation_id)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def notificar_cabeza_nueva(operation_id: str) -> str:
+    """
+    Disparador mínimo e inmutable para que Claudia sepa que hay una cabeza nueva que revisar.
+    NO incluye HASH_CABEZA ni nada que pudiera tratarse como fuente de verdad -- SECUENCIA se
+    incluye solo como referencia orientativa (por ejemplo, para que Claudia priorice), nunca como
+    dato a confiar: ella relee la cadena real desde el origen y calcula sus propios valores.
+    """
+    diagnostico = diagnosticar_cadena_eventos(operation_id)
+    if not diagnostico["eventos"]:
+        raise ValueError(f"No hay eventos para {operation_id} -- nada que notificar")
+
+    notification_id = uuid.uuid4().hex[:12]
+    secuencia_orientativa = int(diagnostico["eventos"][-1]["SECUENCIA"])
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    campos = {
+        "NOTIFICATION_ID": notification_id,
+        "OPERATION_ID": operation_id,
+        "SECUENCIA": str(secuencia_orientativa),
+        "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    carpeta = _carpeta_notificaciones_operacion(operation_id)
+    ruta = os.path.join(carpeta, f"{secuencia_orientativa:010d}_{timestamp}_{notification_id}.json")
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(_serializar_manifiesto(campos))
+    return notification_id
+
+
+def _simular_claudia_crear_checkpoint(operation_id: str, identidad_firmante: str,
+                                       algoritmo_firma: str = "Ed25519", version_esquema: str = "1") -> str:
+    """
+    SOLO PARA PRUEBAS SINTÉTICAS: simula el lado de Claudia leyendo la cadena real desde la
+    fuente, verificándola, y firmando un checkpoint independiente. En el sistema real, quien
+    ejecuta esto es Claudia -- Maira nunca escribe en el almacén de anclaje externo. Existe aquí
+    únicamente para poder probar cómo lo consume Maira (mismo patrón que crear_resolucion_identidad,
+    que simula el lado de Claudia para la resolución de identidad).
+    """
+    diagnostico = diagnosticar_cadena_eventos(operation_id)
+    if not diagnostico["eventos"]:
+        raise ValueError(f"No hay eventos para {operation_id} -- nada que anclar")
+    if not diagnostico["valida"]:
+        raise CadenaEventosInvalida(f"No se puede anclar una cadena no fiable: {operation_id}")
+
+    cabeza = diagnostico["eventos"][-1]
+    checkpoint_id = uuid.uuid4().hex[:12]
+    campos = {
+        "CHECKPOINT_ID": checkpoint_id,
+        "OPERATION_ID": operation_id,
+        "SECUENCIA": cabeza["SECUENCIA"],
+        "HASH_CABEZA": cabeza["_hash_evento"],
+        "HASH_PAQUETE": cabeza.get("HASH_PAQUETE", ""),
+        "FECHA_UTC": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "IDENTIDAD_FIRMANTE": identidad_firmante,
+        "ALGORITMO_FIRMA": algoritmo_firma,
+        "VERSION_ESQUEMA": version_esquema,
+        # Marcador de firma para el prototipo -- la verificación criptográfica real de producción
+        # depende del esquema de claves/PKI que se decida en el spike, no se valida aquí.
+        "FIRMA": _sha256_bytes(f"{checkpoint_id}{operation_id}{cabeza['_hash_evento']}".encode()),
+    }
+    carpeta = _carpeta_anclaje_operacion(operation_id)
+    ruta = os.path.join(carpeta, f"{checkpoint_id}.json")
+    fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # append-only: un checkpoint nunca se reescribe
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(_serializar_manifiesto(campos))
+    return checkpoint_id
+
+
+def leer_checkpoints_externos(operation_id: str) -> list:
+    """Lectura de SOLO LECTURA del anclaje externo -- Maira nunca escribe aquí en producción."""
+    carpeta = os.path.join(_carpeta_raiz_pruebas(), NOMBRE_CARPETA_ANCLAJE, operation_id)
+    if not os.path.isdir(carpeta):
+        return []
+    checkpoints = []
+    for nombre in os.listdir(carpeta):
+        if not nombre.endswith(".json"):
+            continue
+        with open(os.path.join(carpeta, nombre), "r", encoding="utf-8") as f:
+            campos = _parsear_manifiesto(f.read())
+        if "HASH_PAQUETE" in campos and all(campos.get(c) for c in CAMPOS_CHECKPOINT_OBLIGATORIOS):
+            checkpoints.append(campos)
+    return checkpoints
+
+
+def obtener_estado_confirmado(operation_id: str) -> dict:
+    """
+    A diferencia de obtener_estado_actual (proyección local, PROVISIONAL), esto solo marca un
+    estado como firme si existe un checkpoint externo cuyo SECUENCIA, HASH_CABEZA y HASH_PAQUETE
+    coinciden exactamente con la cabeza local. Sin esa coincidencia exacta, el estado sigue siendo
+    provisional -- nunca se reporta como definitivo solo porque la cadena local verifique.
+    """
+    diagnostico = diagnosticar_cadena_eventos(operation_id)
+    if not diagnostico["eventos"]:
+        return {"estado": None, "firme": False, "motivo": "sin eventos"}
+    if not diagnostico["valida"]:
+        raise CadenaEventosInvalida(
+            f"Cadena de eventos de {operation_id} no es fiable: huecos={diagnostico['huecos']}, "
+            f"cadena_rota={diagnostico['cadena_rota']}, ultimo_evento_ausente={diagnostico['ultimo_evento_ausente']}"
+        )
+
+    cabeza = diagnostico["eventos"][-1]
+    estado_provisional = cabeza["ESTADO_NUEVO"]
+
+    for checkpoint in leer_checkpoints_externos(operation_id):
+        if (checkpoint["SECUENCIA"] == cabeza["SECUENCIA"]
+                and checkpoint["HASH_CABEZA"] == cabeza["_hash_evento"]
+                and checkpoint["HASH_PAQUETE"] == cabeza.get("HASH_PAQUETE", "")):
+            return {"estado": estado_provisional, "firme": True, "checkpoint_id": checkpoint["CHECKPOINT_ID"]}
+
+    return {"estado": estado_provisional, "firme": False, "motivo": "sin checkpoint externo que coincida con la cabeza actual"}

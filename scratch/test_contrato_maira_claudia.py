@@ -485,6 +485,72 @@ async def run_tests_async():
         "Un paquete sin su hash (sellado incompleto) nunca debe aparecer como publicado/procesable"
     logger.info("✅ TEST 22 superado: un sellado incompleto no publica el paquete, no queda a medias visible.")
 
+    # -------------------------------------------------------------------------
+    # 23. Notificación de cabeza nueva: mínima, sin HASH_CABEZA (solo dispara, no alimenta)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 23: notificar_cabeza_nueva es mínima y no lleva HASH_CABEZA ---")
+    op_id_anclaje = cmc.crear_operacion_entrada("34600011111", [("doc.pdf", b"h")])
+    cmc.registrar_evento_estado(op_id_anclaje, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="anc-1")
+
+    try:
+        cmc.notificar_cabeza_nueva("MAIRA-SIN-EVENTOS")
+        assert False, "No debe poder notificar una operación sin eventos"
+    except ValueError:
+        pass
+
+    notification_id = cmc.notificar_cabeza_nueva(op_id_anclaje)
+    carpeta_notif = cmc._carpeta_notificaciones_operacion(op_id_anclaje)
+    archivos_notif = os.listdir(carpeta_notif)
+    assert len(archivos_notif) == 1
+    with open(os.path.join(carpeta_notif, archivos_notif[0]), encoding="utf-8") as f:
+        campos_notif = cmc._parsear_manifiesto(f.read())
+    assert campos_notif["NOTIFICATION_ID"] == notification_id
+    assert campos_notif["OPERATION_ID"] == op_id_anclaje
+    assert "HASH_CABEZA" not in campos_notif, "La notificación no debe llevar HASH_CABEZA -- Claudia lo calcula por su cuenta desde la fuente"
+    logger.info("✅ TEST 23 superado: la notificación es un disparador mínimo, nunca la fuente de verdad.")
+
+    # -------------------------------------------------------------------------
+    # 24. Sin checkpoint externo, el estado sigue siendo provisional (no firme)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 24: sin checkpoint externo, obtener_estado_confirmado marca 'no firme' ---")
+    confirmado_sin_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje)
+    assert confirmado_sin_checkpoint["estado"] == "01_ORDENES_ACEPTADAS"
+    assert confirmado_sin_checkpoint["firme"] is False
+    logger.info("✅ TEST 24 superado: sin anclaje externo, el estado nunca se reporta como firme.")
+
+    # -------------------------------------------------------------------------
+    # 25. Con checkpoint que coincide con la cabeza, el estado pasa a firme
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme ---")
+    checkpoint_id = cmc._simular_claudia_crear_checkpoint(op_id_anclaje, identidad_firmante="claudia@berdejoasesores.com")
+    confirmado_con_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje)
+    assert confirmado_con_checkpoint["firme"] is True
+    assert confirmado_con_checkpoint["checkpoint_id"] == checkpoint_id
+    logger.info("✅ TEST 25 superado: con un checkpoint que coincide en secuencia y hashes, el estado se marca firme.")
+
+    # -------------------------------------------------------------------------
+    # 26. Checkpoint DESACTUALIZADO (de una cabeza anterior) no confirma la cabeza nueva
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 26: un checkpoint desactualizado no confirma un evento posterior ---")
+    cmc.registrar_evento_estado(op_id_anclaje, "04_ENTREGADAS", actor="Claudia", comando_id="anc-2")
+    confirmado_desactualizado = cmc.obtener_estado_confirmado(op_id_anclaje)
+    assert confirmado_desactualizado["estado"] == "04_ENTREGADAS", "El estado provisional debe reflejar la cabeza real, aunque no esté confirmada"
+    assert confirmado_desactualizado["firme"] is False, "El checkpoint de la cabeza anterior no debe confirmar la cabeza nueva"
+    logger.info("✅ TEST 26 superado: un checkpoint desactualizado no confirma silenciosamente un estado posterior.")
+
+    # -------------------------------------------------------------------------
+    # 27. Maira nunca escribe en el almacén de anclaje externo (fuera de la simulación de pruebas)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 27: el anclaje externo es append-only, sin doble escritura del mismo checkpoint ---")
+    ruta_checkpoint = os.path.join(cmc._carpeta_anclaje_operacion(op_id_anclaje), f"{checkpoint_id}.json")
+    try:
+        fd = os.open(ruta_checkpoint, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        assert False, "No debe poder reescribirse un checkpoint ya existente"
+    except FileExistsError:
+        pass
+    logger.info("✅ TEST 27 superado: un checkpoint ya escrito nunca admite una segunda escritura.")
+
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
     logger.info("================================================================================")
