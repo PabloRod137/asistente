@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import asyncio
+import hashlib
 import logging
 import tempfile
 import threading
@@ -19,6 +20,20 @@ TEST_DIR = tempfile.mkdtemp(prefix="contrato_maira_claudia_test_")
 os.environ["CONTRATO_MAIRA_CLAUDIA_TEST_DIR"] = TEST_DIR
 
 import contrato_maira_claudia as cmc
+
+KEY_ID_AUTORIDAD_PRUEBA = "key-autoridad-lexguardian-root-pruebas"
+
+
+def _verificador_prueba_simetrico(ack: dict) -> bool:
+    """
+    SOLO PARA PRUEBAS: sustituto de una verificación criptográfica real (que exige un esquema de
+    claves/PKI, pendiente del spike). Recalcula el mismo marcador que usa
+    _simular_claudia_crear_checkpoint y lo compara -- demuestra que el gate de
+    obtener_estado_confirmado funciona (nunca firme sin pasar por un verificador explícito), no
+    que esto sea una firma criptográfica real.
+    """
+    esperado = cmc._sha256_bytes(f"{ack.get('SIGNED_PAYLOAD_HASH')}{ack.get('KEY_ID')}".encode())
+    return ack.get("FIRMA") == esperado
 
 
 def run_tests_sync():
@@ -522,10 +537,15 @@ async def run_tests_async():
     # 25. Con checkpoint que coincide con la cabeza, el estado pasa a firme (V2: vía ACK, no el
     # almacén completo -- y el ACK no debe filtrar detalles de firma)
     # -------------------------------------------------------------------------
-    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme, ACK verificable (V3: ya no despojado) ---")
-    cmc.registrar_clave_vigente("key-2026-01", identidad="claudia@berdejoasesores.com")
+    logger.info("\n--- TEST 25: checkpoint que coincide con la cabeza -> estado firme SOLO con verificador criptográfico real ---")
+    cmc.registrar_clave_vigente("key-2026-01", identidad="claudia@berdejoasesores.com", key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA)
     checkpoint_id = cmc._simular_claudia_crear_checkpoint(op_id_anclaje, identidad_firmante="claudia@berdejoasesores.com", key_id="key-2026-01")
-    confirmado_con_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje)
+
+    # V3 addendum, punto 23: sin verificador_firma_real, NUNCA firme -- aunque todo lo demás encaje.
+    confirmado_sin_verificador = cmc.obtener_estado_confirmado(op_id_anclaje)
+    assert confirmado_sin_verificador["firme"] is False, "Sin verificador criptográfico real, jamás debe reportarse firme=True"
+
+    confirmado_con_checkpoint = cmc.obtener_estado_confirmado(op_id_anclaje, verificador_firma_real=_verificador_prueba_simetrico)
     assert confirmado_con_checkpoint["firme"] is True
     assert confirmado_con_checkpoint["checkpoint_id"] == checkpoint_id
 
@@ -534,14 +554,14 @@ async def run_tests_async():
     for campo_necesario in ("FIRMA", "SIGNED_PAYLOAD_HASH", "ALGORITMO_FIRMA", "IDENTIDAD_FIRMANTE"):
         assert campo_necesario in acks[0], f"V3: el ACK SÍ debe traer {campo_necesario} -- si no, Maira no puede autenticarlo (corrección sobre la V2)"
     assert cmc.verificar_checkpoint_estructural(acks[0]) is True
-    logger.info("✅ TEST 25 superado: estado firme vía ACK completo y verificable -- ya no un ACK sin poder de autenticarse.")
+    logger.info("✅ TEST 25 superado: firme solo aparece con verificador criptográfico real explícito -- nunca por defecto.")
 
     # -------------------------------------------------------------------------
     # 26. Checkpoint DESACTUALIZADO (de una cabeza anterior) no confirma la cabeza nueva
     # -------------------------------------------------------------------------
     logger.info("\n--- TEST 26: un checkpoint desactualizado no confirma un evento posterior ---")
     cmc.registrar_evento_estado(op_id_anclaje, "04_ENTREGADAS", actor="Claudia", comando_id="anc-2")
-    confirmado_desactualizado = cmc.obtener_estado_confirmado(op_id_anclaje)
+    confirmado_desactualizado = cmc.obtener_estado_confirmado(op_id_anclaje, verificador_firma_real=_verificador_prueba_simetrico)
     assert confirmado_desactualizado["estado"] == "04_ENTREGADAS", "El estado provisional debe reflejar la cabeza real, aunque no esté confirmada"
     assert confirmado_desactualizado["firme"] is False, "El checkpoint de la cabeza anterior no debe confirmar la cabeza nueva"
     logger.info("✅ TEST 26 superado: un checkpoint desactualizado no confirma silenciosamente un estado posterior.")
@@ -638,10 +658,10 @@ async def run_tests_async():
     logger.info("\n--- TEST 32: clave revocada (cese) -> el checkpoint no confirma el estado ---")
     op_id_revocada = cmc.crear_operacion_entrada("34600044444", [("doc.pdf", b"k")])
     cmc.registrar_evento_estado(op_id_revocada, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="rv-1")
-    cmc.registrar_clave_vigente("key-a-revocar-001", identidad="claudia@berdejoasesores.com")
-    cmc.revocar_clave("key-a-revocar-001", tipo="cese", motivo="rotación programada")
+    cmc.registrar_clave_vigente("key-a-revocar-001", identidad="claudia@berdejoasesores.com", key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA)
+    cmc.revocar_clave("key-a-revocar-001", tipo="cese", motivo="rotación programada", key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA)
     cmc._simular_claudia_crear_checkpoint(op_id_revocada, "claudia@berdejoasesores.com", "key-a-revocar-001")
-    confirmado_clave_revocada = cmc.obtener_estado_confirmado(op_id_revocada)
+    confirmado_clave_revocada = cmc.obtener_estado_confirmado(op_id_revocada, verificador_firma_real=_verificador_prueba_simetrico)
     assert confirmado_clave_revocada["firme"] is False, "Un checkpoint firmado con clave ya revocada no debe confirmar el estado"
     logger.info("✅ TEST 32 superado: una clave revocada (cese) antes del checkpoint invalida esa confirmación.")
 
@@ -650,7 +670,7 @@ async def run_tests_async():
     # -------------------------------------------------------------------------
     logger.info("\n--- TEST 32b: revocación por compromiso invalida checkpoints anteriores a la fecha estimada del compromiso ---")
     try:
-        cmc.revocar_clave("key-nunca-usada", tipo="compromiso", motivo="sin fecha")
+        cmc.revocar_clave("key-nunca-usada", tipo="compromiso", motivo="sin fecha", key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA)
         assert False, "Una revocación por compromiso sin fecha_efectiva debe rechazarse"
     except ValueError:
         pass
@@ -658,13 +678,13 @@ async def run_tests_async():
     op_id_compromiso = cmc.crear_operacion_entrada("34600066666", [("doc.pdf", b"m")])
     cmc.registrar_evento_estado(op_id_compromiso, "01_ORDENES_ACEPTADAS", actor="Claudia", comando_id="cp-1")
     cmc.registrar_clave_vigente("key-comprometida-002", identidad="claudia@berdejoasesores.com",
-                                 fecha_utc="2026-01-01T00:00:00Z")
+                                 key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA, fecha_utc="2026-01-01T00:00:00Z")
     checkpoint_antes_del_aviso = cmc._simular_claudia_crear_checkpoint(op_id_compromiso, "claudia@berdejoasesores.com", "key-comprometida-002")
     # El compromiso se DETECTA hoy, pero se estima que la clave llevaba comprometida desde antes
     # de que se firmara el checkpoint de arriba -- fecha_efectiva anterior a FECHA_UTC del checkpoint.
     cmc.revocar_clave("key-comprometida-002", tipo="compromiso", motivo="clave filtrada, detectado tarde",
-                       fecha_efectiva="2026-01-15T00:00:00Z")
-    confirmado_compromiso = cmc.obtener_estado_confirmado(op_id_compromiso)
+                       key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA, fecha_efectiva="2026-01-15T00:00:00Z")
+    confirmado_compromiso = cmc.obtener_estado_confirmado(op_id_compromiso, verificador_firma_real=_verificador_prueba_simetrico)
     assert confirmado_compromiso["firme"] is False, \
         "Una revocación por compromiso debe invalidar checkpoints firmados desde la fecha ESTIMADA, aunque sean anteriores al aviso de revocación"
     logger.info("✅ TEST 32b superado: revocación por compromiso invalida retroactivamente desde la fecha estimada, no solo desde el aviso.")
@@ -702,6 +722,113 @@ async def run_tests_async():
         "Debe haber firmado la cabeza ACTUALIZADA (04_ENTREGADAS), no la obsoleta (01_ORDENES_ACEPTADAS)"
     assert checkpoint_carrera["SECUENCIA"] == "1"
     logger.info("✅ TEST 33 superado: un cambio de cabeza a mitad de la verificación provoca un reintento sobre la cabeza real.")
+
+    # -------------------------------------------------------------------------
+    # 34. Manipulación de un ARCHIVO del paquete (no del manifiesto) se detecta -- PaqueteManipulado
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 34: modificar, añadir, eliminar o renombrar un adjunto se detecta como PaqueteManipulado ---")
+
+    def _crear_operacion_con_adjunto():
+        op_id = cmc.crear_operacion_entrada("34600077777", [("adjunto.pdf", b"contenido original")])
+        carpeta = next(p["_carpeta"] for p in cmc._listar_todos_los_paquetes() if p["OPERATION_ID"] == op_id)
+        return op_id, carpeta
+
+    op_id_mod, carpeta_mod = _crear_operacion_con_adjunto()
+    with open(os.path.join(carpeta_mod, "adjunto.pdf"), "wb") as f:
+        f.write(b"contenido SUSTITUIDO tras el sellado")
+    try:
+        cmc._hash_manifiesto_sellado(op_id_mod)
+        assert False, "Un adjunto modificado tras el sellado debe detectarse"
+    except cmc.PaqueteManipulado:
+        pass
+
+    op_id_add, carpeta_add = _crear_operacion_con_adjunto()
+    with open(os.path.join(carpeta_add, "archivo_colado.pdf"), "wb") as f:
+        f.write(b"esto no estaba declarado en ARCHIVOS")
+    try:
+        cmc._hash_manifiesto_sellado(op_id_add)
+        assert False, "Un archivo añadido de más, no declarado, debe detectarse"
+    except cmc.PaqueteManipulado:
+        pass
+
+    op_id_del, carpeta_del = _crear_operacion_con_adjunto()
+    os.remove(os.path.join(carpeta_del, "adjunto.pdf"))
+    try:
+        cmc._hash_manifiesto_sellado(op_id_del)
+        assert False, "Un archivo eliminado debe detectarse"
+    except cmc.PaqueteManipulado:
+        pass
+
+    op_id_ren, carpeta_ren = _crear_operacion_con_adjunto()
+    os.rename(os.path.join(carpeta_ren, "adjunto.pdf"), os.path.join(carpeta_ren, "adjunto_renombrado.pdf"))
+    try:
+        cmc._hash_manifiesto_sellado(op_id_ren)
+        assert False, "Un archivo renombrado debe detectarse (ya no coincide con lo declarado)"
+    except cmc.PaqueteManipulado:
+        pass
+
+    op_id_sano, _ = _crear_operacion_con_adjunto()
+    assert cmc._hash_manifiesto_sellado(op_id_sano) is not None, "El caso sano (sin tocar nada) debe seguir funcionando con normalidad"
+    logger.info("✅ TEST 34 superado: modificación, adición, eliminación y renombrado de adjuntos se detectan; el caso sano sigue intacto.")
+
+    # -------------------------------------------------------------------------
+    # 35. Un registro de alta/revocación de clave manipulado falla CERRADO (nunca se ignora)
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 35: alta/revocación de clave manipulada -> fallo cerrado, nunca se ignora en silencio ---")
+    cmc.registrar_clave_vigente("key-alta-manipulada", identidad="claudia@berdejoasesores.com", key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA)
+    ahora = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert cmc._clave_vigente_en("key-alta-manipulada", ahora) is True, "Sin manipular nada, un alta recién registrada debe ser vigente"
+    ruta_alta = os.path.join(cmc._carpeta_claves_vigentes(), "key-alta-manipulada.json")
+    with open(ruta_alta, "a", encoding="utf-8") as f:
+        f.write("IDENTIDAD: identidad-inyectada\n")
+    assert cmc._clave_vigente_en("key-alta-manipulada", ahora) is False, "Un alta manipulada no debe considerarse vigente"
+
+    cmc.registrar_clave_vigente("key-revocacion-manipulada", identidad="claudia@berdejoasesores.com",
+                                 key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA, fecha_utc="2020-01-01T00:00:00Z")
+    cmc.revocar_clave("key-revocacion-manipulada", tipo="cese", motivo="prueba",
+                       key_id_autoridad=KEY_ID_AUTORIDAD_PRUEBA, fecha_utc="2030-01-01T00:00:00Z")
+    # Sin manipular nada, a una fecha ENTRE el alta y el corte de la revocación, la clave sí sería vigente.
+    assert cmc._clave_vigente_en("key-revocacion-manipulada", "2025-06-01T00:00:00Z") is True
+    ruta_revocacion = os.path.join(cmc._carpeta_claves_revocadas(), "key-revocacion-manipulada.json")
+    with open(ruta_revocacion, "a", encoding="utf-8") as f:
+        f.write("MOTIVO: motivo-inyectado\n")
+    assert cmc._clave_vigente_en("key-revocacion-manipulada", "2025-06-01T00:00:00Z") is False, \
+        "Una revocación manipulada debe tratarse como YA revocada (fallo cerrado), nunca como si no existiera"
+    logger.info("✅ TEST 35 superado: alta/revocación manipuladas invierten el resultado hacia el lado seguro -- nunca se ignoran.")
+
+    # -------------------------------------------------------------------------
+    # 36. Vectores de prueba interoperables: la especificación canónica no depende de este código
+    # -------------------------------------------------------------------------
+    logger.info("\n--- TEST 36: vectores de prueba fijos para el payload canónico (verificables en cualquier lenguaje) ---")
+    vector_1 = {
+        "CHECKPOINT_ID": "cp-vector-0001", "OPERATION_ID": "MAIRA-VECTOR-0001", "SECUENCIA": "0",
+        "HASH_CABEZA": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "HASH_PAQUETE": "f9e8d7c6b5a4030201f9e8d7c6b5a4030201f9e8d7c6b5a4030201f9e8d7c6b5",
+        "FECHA_UTC": "2026-08-31T10:00:00Z", "KEY_ID": "key-2026-01",
+        "IDENTIDAD_FIRMANTE": "claudia@berdejoasesores.com", "ALGORITMO_FIRMA": "Ed25519", "VERSION_ESQUEMA": "3",
+    }
+    payload_1 = cmc._payload_canonico(vector_1, cmc.CAMPOS_FIRMADOS_ANCLAJE_V3)
+    assert payload_1 == (
+        b'["cp-vector-0001","MAIRA-VECTOR-0001","0",'
+        b'"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",'
+        b'"f9e8d7c6b5a4030201f9e8d7c6b5a4030201f9e8d7c6b5a4030201f9e8d7c6b5",null,'
+        b'"2026-08-31T10:00:00Z","key-2026-01","claudia@berdejoasesores.com","Ed25519","3"]'
+    )
+    assert hashlib.sha256(payload_1).hexdigest() == "ba45933ad655ba2bc66c084da22408f771316a71ad6a968f1010e27c3df8c075"
+
+    vector_2 = dict(vector_1)
+    vector_2["CHECKPOINT_ID"] = "cp-vector-0002"
+    del vector_2["HASH_PAQUETE"]
+    vector_2["MOTIVO_SIN_PAQUETE"] = "no_existe_paquete_para_esta_operacion"
+    payload_2 = cmc._payload_canonico(vector_2, cmc.CAMPOS_FIRMADOS_ANCLAJE_V3)
+    assert payload_2 == (
+        b'["cp-vector-0002","MAIRA-VECTOR-0001","0",'
+        b'"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",null,'
+        b'"no_existe_paquete_para_esta_operacion","2026-08-31T10:00:00Z","key-2026-01",'
+        b'"claudia@berdejoasesores.com","Ed25519","3"]'
+    )
+    assert hashlib.sha256(payload_2).hexdigest() == "d9407a3dd94be53ed17b5c67218982af7038ef51504ccfbad1c7d899235be030"
+    logger.info("✅ TEST 36 superado: el payload canónico y su hash coinciden EXACTAMENTE con los vectores publicados en el addendum V3.")
 
     logger.info("\n================================================================================")
     logger.info("   ✅ TODAS LAS PRUEBAS DEL CONTRATO MAIRA-CLAUDIA (SINTÉTICAS) PASARON")
