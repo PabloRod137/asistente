@@ -1,0 +1,41 @@
+# Despliegue de Maira en un servidor compartido con otros servicios.
+# Fase actual: solo Telegram (polling), sin WhatsApp -> no se publica ningun puerto a internet.
+#
+#   docker compose up -d --build      (desde la carpeta del proyecto, con el .env ya creado)
+#   docker compose logs -f maira
+#
+# Aislado de otros contenedores del servidor: nombre propio, volumen propio, limites de recursos
+# y logs rotados. El panel (/panel) solo escucha en 127.0.0.1: se accede por tunel SSH.
+name: maira-pruebas
+
+services:
+  maira:
+    build: .
+    image: maira:pruebas
+    container_name: maira-pruebas
+    restart: unless-stopped
+    env_file:
+      - .env            # si falta, compose falla con un error claro en vez de arrancar sin configuracion
+    environment:
+      DB_PATH: /data/chatbot.db
+      STORAGE_RUTA: /data/storage
+    volumes:
+      - maira-datos:/data
+    ports:
+      - "127.0.0.1:${MAIRA_PANEL_PUERTO:-8060}:8050"
+    mem_limit: 512m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8050/', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  maira-datos:
