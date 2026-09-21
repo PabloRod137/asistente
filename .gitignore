@@ -50,3 +50,8 @@ chrome_amigo_data/
 *log.txt
 log/
 logs/
+
+# Auxiliares de SQLite y copias de cualquier base local
+*.db-wal
+*.db-shm
+*.db.bak

@@ -17,7 +17,7 @@ services:
     env_file:
       - .env            # si falta, compose falla con un error claro en vez de arrancar sin configuracion
     environment:
-      DB_PATH: /data/chatbot.db
+      DB_PATH: /data/maira.db
       STORAGE_RUTA: /data/storage
     volumes:
       - maira-datos:/data

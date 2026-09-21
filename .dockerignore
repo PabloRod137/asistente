@@ -28,3 +28,6 @@ log/
 logs/
 .vscode/
 .idea/
+*.db-wal
+*.db-shm
+*.db.bak

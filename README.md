@@ -173,7 +173,7 @@ pip install -r requirements.txt
 ```
 
 **Crear Base de Datos SQLite:**
-La base de datos `chatbot.db` se crea e inicializa automáticamente con la estructura necesaria la primera vez que se inicia el servidor.
+La base de datos de Maira (`maira.db`, configurable con `DB_PATH`) se crea e inicializa automáticamente con la estructura necesaria la primera vez que se inicia el servidor.
 
 **Arrancar con Uvicorn:**
 ```bash
@@ -327,7 +327,7 @@ Para desplegar Maira para una nueva gestoría, sin tocar código:
 - [ ] Revisar qué variables `MODULO_[X]` activar o desactivar según el plan contratado por la gestoría (agenda, tickets, facturas, triaje, cobrador, etc.).
 
 ### Base de datos
-- [ ] Confirmar que se arranca con una base de datos limpia (`chatbot.db` nuevo), no la de otro cliente ni la de desarrollo/pruebas.
+- [ ] Confirmar que se arranca con una base de datos limpia (`maira.db` nueva), no la de otro cliente ni la de desarrollo/pruebas.
 
 ---
 
