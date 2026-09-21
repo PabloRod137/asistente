@@ -14,6 +14,32 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# La clave de Gemini viaja en la URL (?key=...) y el token de Telegram en la ruta (/bot<TOKEN>/...).
+# httpx registra esa URL a nivel INFO, y sus excepciones (raise_for_status) la incluyen en el mensaje,
+# que varios módulos escriben en el log: sin esto los secretos acabarían en los logs del servidor.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+_VARIABLES_SECRETAS = (
+    "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "WHATSAPP_TOKEN",
+    "MS_CLIENT_SECRET", "SMTP_PASSWORD", "META_APP_SECRET", "PANEL_PASSWORD",
+)
+
+
+class _FormatterSinSecretos(logging.Formatter):
+    """Tapa el valor de cualquier variable secreta que aparezca en una línea de log (incl. trazas)."""
+    def format(self, record):
+        texto = super().format(record)
+        for var in _VARIABLES_SECRETAS:
+            valor = os.getenv(var, "")
+            if len(valor) >= 8:
+                texto = texto.replace(valor, "***")
+        return texto
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(_FormatterSinSecretos('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
 logger = logging.getLogger("asistente.main")
 
 load_dotenv()

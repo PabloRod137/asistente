@@ -1,7 +1,7 @@
 fastapi==0.109.2
 uvicorn==0.27.1
 requests==2.31.0
-google-genai>=0.1.1
+google-genai==1.46.0
 python-dotenv==1.0.1
 pydantic==2.6.1
 APScheduler==3.10.4
@@ -13,6 +13,6 @@ google-auth==2.27.0
 pymsteams==0.2.2
 pdfplumber==0.11.0
 msal==1.28.0
-httpx>=0.25.0
+httpx==0.28.1
 python-telegram-bot==22.7
 

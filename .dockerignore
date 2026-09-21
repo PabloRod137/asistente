@@ -4,7 +4,11 @@
 .env
 .env.local
 .env.*
+*.env
 *.db
+# Datos de desarrollo y pruebas: en el servidor van en el volumen /data, no dentro de la imagen
+storage/
+scratch/
 *.sqlite
 *.sqlite3
 __pycache__/
